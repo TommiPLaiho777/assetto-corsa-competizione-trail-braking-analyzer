@@ -1,6 +1,6 @@
 @echo off
 cd /d "%~dp0"
-echo [0.2.4.1] Offline safety checks - ACC should be CLOSED.
+echo [0.2.5] Offline safety checks - ACC should be CLOSED.
 if not exist ".venv\Scripts\python.exe" (
   echo Run install_windows.bat first.
   pause

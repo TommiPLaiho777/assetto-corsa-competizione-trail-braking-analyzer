@@ -32,3 +32,40 @@ Ulosajosta johtuvaa ohjausvauriota ohjelma EI tunnista varmasti.
 
 HUOM: Tämä on Windows-livekäytöltään vielä TESTIVERSIO. Vaikka 0.2.3 toimi,
 se ei yksin vahvista uuden 0.2.4.1-version virheettömyyttä.
+
+VERSIO 0.2.5 — LÄPINÄKYVÄ MINI HUD
+- Uusi Mini HUD: iso värikoodattu numero (1–5 tai –), yksi lyhyt palaute.
+- Mini HUDin tausta on läpinäkyvä, eikä siinä ole reunusta tai laatikkoa.
+- Sen oikeassa yläkulmassa ovat pienet miinus- ja sulkupainikkeet.
+- Siirrä HUDia raahaamalla numeroa tai tekstipalautetta hiirellä.
+- Suljettu/pienennetty HUD voidaan palauttaa pääikkunan Mini HUD -painikkeesta.
+- Pääikkuna pienenee normaalisti Windowsin otsikkorivin miinuksesta tai
+  "Minimize details" -painikkeesta; HUD toimii siitä riippumatta.
+- "Keep detailed GUI on top" tuo laajan analyysin tarvittaessa päällimmäiseksi.
+- Uusi arvio ilmestyy MINI HUDiin vasta kun jarru ja kääntyminen rauhoittuvat.
+- ACC:n päällä näkyvät ikkunat vaativat yleensä Borderless Windowed -tilan,
+  eivät välttämättä toimi Exclusive Fullscreen -tilassa.
+- Missed apex -palautetta EI väitetä, koska ajolinjaa ei vielä mitata.
+- ACC:n turvallista muistilukijaa ja pisteytysmoottoria EI muutettu.
+- Windows-käyttöliittymä tarvitsee edelleen ensimmäisen käytännön testin.
+
+GITHUB PR #1:N PAIVITYS (EI MUUTA MAIN-HAARAA)
+- Kun olet tyytyvainen demo-testin toimintaan, aja update_existing_pr.bat.
+- Skripti kloonaa uuden tyokansion, päivittää nykyista kehityshaaraa
+  ja samaa luonnos-PR #1:tä, ei luo uutta Pull Requestia.
+- Tarvitset Gitin ja oman GitHub-kirjautumisesi. Aiemmat tyokansiot
+  sailytetaan, paivitysta ei pakoteta.
+
+VERSIO 0.2.5.1 — MINI HUDIN NOPEAMPI PALAUTE
+- Mini HUDin ulkoasu ja ohjaimet ovat samat kuin 0.2.5:ssa.
+- Lopullinen arvostelu valmistuu nyt noin 2,6 sekunnin tarkastelun
+  jälkeen (aiemmin 3,0 s).
+- HUD tarvitsee tämän jalkeen 0,24 s rauhallista, suunnilleen
+  suoraa ajoa (aiemmin 0,48 s). Jos auto on yha kaarteessa,
+  tulos odottaa eika kehota katsomaan HUDia kesken mutkan.
+- HUDin voi raahata kojetaulun ylapuolelle, ja paikka tallentuu.
+- Tallennetun 68 jarrutuksen otoksen pisteet sailivat offline-uusintalaskennassa
+  samoina. Se ei takaa tarkkaa pisteytysta kaikissa uusissa mutkissa.
+- ACC-muistilukija ja arvosanan laskukaavat eivat muuttuneet.
+- Aja install_windows.bat ja run_preflight_no_game.bat ennen livekoetta.
+- Erillinen v0.2.5-kansio kannattaa sailyttaa varmuuskopiona.

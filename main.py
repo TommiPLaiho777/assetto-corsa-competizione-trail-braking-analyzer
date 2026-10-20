@@ -9,8 +9,8 @@ import time
 from datetime import datetime
 
 import numpy as np
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtWidgets import (QApplication, QHBoxLayout, QLabel, QMainWindow,
+from PyQt5.QtCore import Qt, QTimer, QSettings
+from PyQt5.QtWidgets import (QApplication, QCheckBox, QHBoxLayout, QLabel, QMainWindow,
                              QMessageBox, QPushButton, QVBoxLayout, QWidget)
 import pyqtgraph as pg
 
@@ -21,6 +21,9 @@ from calibration_engine import calibrate_live
 from coaching_engine import assess
 from raw_event_store import encode_event
 from stats_ui import BrakingStatsWindow
+from mini_hud import MiniHUD
+from hud_presentation import (describe, safe_straight, POST_RELEASE_OBSERVATION_S,
+                              STEADY_STRAIGHT_S)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -32,13 +35,38 @@ class TrailBrakingApp(QMainWindow):
     def __init__(self, mode: str = "demo"):
         super().__init__()
         self.mode = mode
-        self.setWindowTitle(f"Advanced Trail Braking 0.2.4.1 | {mode.upper()} rotation coach")
+        self.setWindowTitle(f"Advanced Trail Braking 0.2.5.1 | {mode.upper()} rotation coach")
         # Safety hotfix: do not force an overlay above the DirectX game.
         # Use normal desktop/windowed layout during initial validation.
         self.resize(550, 680)
+        # Native Windows title bar: its normal minimize control is retained.
+        # Detailed GUI stays on top ONLY when the user explicitly requests it.
+        self.setWindowFlags(Qt.Window | Qt.WindowMinimizeButtonHint |
+                            Qt.WindowMaximizeButtonHint | Qt.WindowCloseButtonHint)
+        self.settings = QSettings('AdvancedTrailBraking', 'RotationCoach')
+        self._pending_hud = None
+        self._straight_since = None
+        self.mini_hud = MiniHUD()  # independent top-level window, not a child
+        self.mini_hud.visibilityChanged.connect(self._update_hud_button)
         central = QWidget()
+        central.setObjectName('MainCentral')
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
+
+        window_controls = QHBoxLayout()
+        self.btn_hud = QPushButton('Hide Mini HUD')
+        self.btn_hud.setToolTip('Show, restore, or hide the independent transparent Mini HUD')
+        self.btn_hud.clicked.connect(self.toggle_hud)
+        window_controls.addWidget(self.btn_hud)
+        self.btn_minimize_details = QPushButton('− Minimize details')
+        self.btn_minimize_details.clicked.connect(self.showMinimized)
+        window_controls.addWidget(self.btn_minimize_details)
+        layout.addLayout(window_controls)
+        self.check_on_top = QCheckBox('Keep detailed GUI on top')
+        self.check_on_top.setToolTip('The main analysis window floats on top only while checked. Use ACC borderless/windowed mode for overlays.')
+        self.check_on_top.setChecked(self.settings.value('detailsAlwaysOnTop', False, type=bool))
+        self.check_on_top.toggled.connect(self.set_details_on_top)
+        layout.addWidget(self.check_on_top)
 
         self.status = QLabel("SAFE DEMO – synthetic data only" if mode == "demo"
                              else "LIVE EXPERIMENTAL – waiting for ACC physics data")
@@ -98,12 +126,53 @@ class TrailBrakingApp(QMainWindow):
         self.acc = (ACCSharedMemory(process_guard=acc_process_running)
                     if self.mode == "live" else DemoSource())
         self._offline_since = None
-        self.tracker = EventTracker(post_seconds=3.0)
+        self.tracker = EventTracker(post_seconds=POST_RELEASE_OBSERVATION_S)
         self.stats = None
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.on_tick)
         self._last_draw = 0.0
         self.timer.start(40)  # 25Hz, reducing UI work during ACC tests.
+        if self.check_on_top.isChecked():
+            self.set_details_on_top(True)
+        # No need to expose the full analysis panel during driving.
+        self.mini_hud.show()
+
+    def _update_hud_button(self):
+        if not self.mini_hud.isVisible():
+            self.btn_hud.setText('Show Mini HUD')
+        elif self.mini_hud.isMinimized():
+            self.btn_hud.setText('Restore Mini HUD')
+        else:
+            self.btn_hud.setText('Hide Mini HUD')
+
+    def toggle_hud(self):
+        if not self.mini_hud.isVisible() or self.mini_hud.isMinimized():
+            self.mini_hud.showNormal()
+        else:
+            self.mini_hud.hide()
+        self._update_hud_button()
+
+    def set_details_on_top(self, enabled: bool):
+        self.settings.setValue('detailsAlwaysOnTop', bool(enabled))
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, bool(enabled))
+        # On Windows Qt needs to re-show after switching native window flags.
+        self.show()
+        if enabled:
+            self.raise_()
+
+    def _maybe_update_hud(self, sample):
+        if self._pending_hud is None:
+            return
+        if not safe_straight(sample):
+            self._straight_since = None
+            return
+        if self._straight_since is None:
+            self._straight_since = sample.time
+            return
+        if sample.time - self._straight_since >= STEADY_STRAIGHT_S:
+            self.mini_hud.set_message(self._pending_hud)
+            self._pending_hud = None
+            self._straight_since = None
 
     def on_tick(self):
         sample = self.acc.read()
@@ -136,6 +205,12 @@ class TrailBrakingApp(QMainWindow):
             self.show_feedback(feedback, coach)
             if feedback.phase == "final":
                 calibration = None
+                # Mini HUD never draws a provisional grade. It holds the final
+                # result until a straight-ish low-brake interval is observed.
+                # The large detailed GUI continues to show full evidence.
+                self._pending_hud = describe(coach)
+                self._straight_since = None
+                calibration = None
                 if completed is not None:
                     try:
                         calibration = calibrate_live(feedback, *completed)
@@ -143,6 +218,8 @@ class TrailBrakingApp(QMainWindow):
                         # Preserve main coach result even if older shadow fails.
                         pass
                 self.save_event(feedback, calibration, coach, completed)
+        # Display is deliberately delayed, not the underlying score.
+        self._maybe_update_hud(sample)
         # Live plots are throttled independently of telemetry capture.
         now = time.monotonic()
         if now - self._last_draw >= 0.12:
@@ -235,6 +312,10 @@ class TrailBrakingApp(QMainWindow):
             if os.path.exists(raw):
                 os.replace(raw, os.path.join(target, f"raw_braking_events_{stamp}.jsonl"))
             self.tracker.reset()
+            self._pending_hud = None
+            self._straight_since = None
+            from hud_presentation import HUDMessage
+            self.mini_hud.set_message(HUDMessage(None, 'Waiting for completed corner', '#BEC9D6', '#BEC9D6'))
             self.rating.setText("– / 5")
             self.diagnosis.setText("NEW STINT")
             self.detail.setText("Previous event log archived safely in data/.")
@@ -250,6 +331,7 @@ class TrailBrakingApp(QMainWindow):
     def closeEvent(self, event):
         self.timer.stop()
         self.acc.close()
+        self.mini_hud.close()
         super().closeEvent(event)
 
     def show_stats(self):
@@ -263,16 +345,19 @@ class TrailBrakingApp(QMainWindow):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Advanced Trail Braking v0.2.4")
+    parser = argparse.ArgumentParser(description="Advanced Trail Braking v0.2.5")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--demo", action="store_true", help="Synthetic UI demo; never opens ACC memory")
     mode.add_argument("--live", action="store_true", help="Experimental read-only ACC integration")
     args = parser.parse_args()
     chosen_mode = "live" if args.live else "demo"  # fail-safe default
     app = QApplication(sys.argv[:1])
-    app.setStyleSheet("QWidget { background: #17232c; color: white; } "
-                      "QPushButton { background: #334d62; padding: 9px; border-radius: 5px; } "
-                      "QPushButton:hover { background: #466985; }")
+    # Scope dark fills to the analysis window. The Mini HUD must remain alpha.
+    app.setStyleSheet("QWidget#MainCentral { background: #17232c; color: white; } "
+                      "QMainWindow { background: #17232c; color: white; } "
+                      "QPushButton { background: #334d62; color: white; padding: 9px; border-radius: 5px; } "
+                      "QPushButton:hover { background: #466985; } "
+                      "QCheckBox { color: white; }")
     window = TrailBrakingApp(mode=chosen_mode)
     window.show()
     return app.exec_()

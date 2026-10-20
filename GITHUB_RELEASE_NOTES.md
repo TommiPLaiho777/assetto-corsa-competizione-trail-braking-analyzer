@@ -1,3 +1,6 @@
+## 0.2.5.1 follow-up
+Mini HUD delivery latency reduced (post-release 2.6 s, continuous straight-ish gate 0.24 s); code-scoring heuristic/ACC memory mapping unchanged. 68 private user traces were replay-checked, but not committed. Live Windows validation remains necessary.
+
 # Development branch: Advanced Trail Braking 0.2.4.1
 
 This branch updates the original ACC trail braking analyzer to the v0.2.4.1 source-only test build.
