@@ -1,31 +1,72 @@
-Assetto Corsa Competizione: Pro Physics & Trail Braking Analyzer
-1. How the Program Works (The Mechanics)
-The application is a real-time, ultra-low-latency telemetry analyzer built specifically for Assetto Corsa Competizione (ACC).
+**HOTFIX 0.2.4.1:** New empirical raw logs exposed a serious 0.2.4 scoring bug: normal initial brake application was counted as repeated brake reapplications, unfairly reducing trail grades. The fix counts pressure rises only after the event's initial peak brake pressure. The ACC memory reader, game integration and existing data format remain unchanged. Old 0.2.4 raw logs can be replayed offline using `run_replay_offline.bat`; old history records are never overwritten. A better grade does not prove a faster corner.
 
-Live Telemetry Extraction: It taps directly into ACC's engine via Shared Memory mapping, pulling raw physics data at a high frequency (50Hz) without impacting game performance.
+# Advanced Trail Braking 0.2.4.1 — brake reapplication scoring hotfix
 
-Dynamic Data Processing: Utilizing highly optimized NumPy arrays instead of standard memory lists, the program actively records steering angle, brake pressure, front suspension load, and tire slip ratios the moment a corner entry is detected.
+**Windows Python source test build — not an EXE.** This revision is based on the user's
+working 0.2.3, which reportedly ran ACC without crashes. However, **0.2.4 itself has
+not been live-verified on this machine**. Do not use on an important race session.
 
-Real-Time Visualization: As you drive, the tool plots your actual input curve (green line) against an ideal, dynamically calculated mathematical boundary (red dashed line).
+## What's changed
 
-Instant Diagnostics: Once the brake is fully released, a custom scoring algorithm immediately evaluates the maneuver, logging the data and updating a separate live diagnostic dashboard with physics-based feedback.
+- **New primary 0.2.4.1 grade (1–5)** appears **immediately after brake release**
+  as provisional. It is revised after up to **3.0 seconds** of post-release
+  observation. Old 0.2.2 grade stays separately visible as **Legacy**.
+- Evaluates real brake-pressure taper *while steering and yaw are present*,
+  sustained measured rotation, high brake/steer overlap, excessive yaw reversal,
+  brake reapplications, neutral-pedal coasting and observed early exit progress.
+- A 5 requires **multiple independent signals**: controlled release, stable yaw,
+  low excessive high-brake/steer overlap, low coasting and some acceleration after
+  release. These are **heuristics, not proof of the fastest corner**.
+- **Straight-line braking or braking completed before turning: NOT GRADED** as
+  trail braking. These techniques may be correct in many corners.
+- Extends look-ahead from ~1.2 s to **3 s**, so it can detect some previously
+  hidden coasting. If another brake starts sooner, evidence is incomplete and
+  grade 5 should not be awarded based solely on rotation.
+- Low-speed/stopping events are excluded without claiming a collision/damage
+  diagnosis. A damaged car should be repaired, not coached through damage.
+- New `data/raw_braking_events.jsonl` stores only telemetry from each braking
+  event, separately from `data/braking_history.jsonl`, to permit offline replay
+  and future calibration **without driving again**. No screenshot autosaves.
+- `score` in history remains the **original 0.2.2 grade**; `calibration` is
+  **old 0.2.3 shadow**; `coaching` contains **new 0.2.4**. Data schemas do not mix.
+- **The ACC shared memory reader (`acc_memory.py`) is byte-identical to 0.2.3.**
+  It does not create named memory sections, uses read access only, and attaches
+  only on explicit live mode with an ACC process guard. No game controls/inputs.
 
-2. What It Is Based On (The Physics)
-The underlying logic of the analyzer is firmly rooted in real-world motorsport physics and vehicle dynamics:
+## Installation and careful Windows validation
 
-The Traction Circle (Friction Circle): A tire has a finite maximum grip limit. 100% of the grip can be used for braking or cornering. If you are blending both, the transition must be proportional. The program calculates the geometric Mean Absolute Error (MAE) between your input and the ideal curved boundary, penalizing inputs that fail to maximize the available grip.
+1. **Leave 0.2.3 unchanged**. Close the older Trail Braking window and extract
+   this ZIP into a **separate folder**. No reboot is required; do not stop other
+   Python / Rhino automation jobs.
+2. Run `install_windows.bat` (private `.venv` only; requires Windows Python 3.11
+   or 3.12 x64). Installation may require internet for dependencies.
+3. With **ACC closed**, run `run_preflight_no_game.bat`. All tests must pass.
+4. With **ACC closed**, run `run_windows.bat` for a synthetic UI demonstration.
+5. Only if both succeed and you accept the possibility of a game crash: open
+   ACC normally, let a practice session finish loading, then run
+   `run_live_after_acc_loaded.bat`. Remain in the pits initially and stop on
+   any instability. The software does **not** launch ACC.
 
-Chassis Balance & Weight Transfer: The software actively monitors the combined load on the front suspension (measured in Newtons). If the brake is released too abruptly, it triggers a Suspension Snap penalty. An abrupt release decompresses the front springs violently, shifting the car's weight to the rear and instantly killing front-end grip.
+## Reviewing/archiving logs
 
-Tire Saturation (Slip Ratio): The system tracks the physical slip ratio of the front tires. Pushing past the optimal slip angle triggers an Excessive Slip penalty, mathematically detecting understeer caused by over-driving the entry phase.
+- `data/braking_history.jsonl`: event overview, original+shadow+new grades.
+- `data/raw_braking_events.jsonl`: replayable **actual brake/steer/yaw samples**;
+  this may grow over time and is separate to keep the stats window responsive.
+- `run_replay_offline.bat`: re-evaluate 0.2.4 events *offline* from raw data.
+- `run_history_comparison.bat`: legacy 0.2.2 vs 0.2.3 shadow (archived metrics).
+  **Past 0.2.3 logs do not contain raw time series, and cannot be evaluated
+  reliably using 0.2.4 without inventing missing telemetry.**
+- Personal reference driving logs and replay reports are intentionally excluded from the public repository.
+  Supply local logs to the offline comparison tools when needed.
+- 'Archive & New Stint' archives overview history; it archives the
+  raw replay log under the same timestamp to preserve per-stint pairing.
 
-3. What Can Be Achieved (The Benefits)
-Using this tool bridges the gap between guessing and knowing, allowing you to objectively refine your driving technique:
+## Limits and safety
 
-Mastering the Release Phase: Trail braking is not about how hard you press the brake, but how smoothly you let it go. This tool provides instant, visual feedback on the exact quality of your brake release.
+Car/steering setup, yaw sign conventions, corner geometry, grip, conditions,
+minimum speed, track position and true exit time are not known sufficiently to
+certify the ideal line or prove yaw was caused by braking. Small observed speed
+gains do not prove a faster corner. The feedback is a coaching suggestion only.
 
-Refining Left-Foot Braking: By analyzing the exact contour of the braking curve, you can effectively train and calibrate the delicate muscle memory required for elite-level left-foot braking.
-
-Eliminating Pedal "Noise": The algorithm actively detects pedal pumping and micro-stutters. Smoothing out these nervous, jagged inputs ensures a highly stable aerodynamic platform throughout the corner.
-
-Faster, More Consistent Laptimes: By synchronizing your steering input perfectly with your brake release, you maximize minimum corner speed, eliminate mid-corner understeer, and carry significantly more momentum onto the ensuing straights.
+`python -m unittest discover -s tests -p "test_*.py"` runs the offline tests.
+Windows-only memory tests are skipped when run outside Windows.

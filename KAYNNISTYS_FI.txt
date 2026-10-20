@@ -1,0 +1,34 @@
+ADVANCED TRAIL BRAKING 0.2.4.1 – TRAIL, ROTAATIO JA ULOSTULO
+
+UUTTA: ohjelman pääarvosana on 0.2.4.1:n arvio jarrulla kääntymisestä.
+Se annetaan heti jarrun vapautuessa alustavana ja tarkentuu noin 3 s
+kuluttua, mikäli ulostulo on ehditty havaita. Vanha 0.2.2-piste näkyy
+erikseen vertailuna. Viitonen vaatii aiempaa kattavammat havainnot.
+
+TURVALLINEN KÄYTTÖ:
+1. ÄLÄ korvaa toimivaa 0.2.3-kansiota. Sulje sen ikkuna.
+2. Pura tämä versio UUTEEN kansioon.
+3. Suorita install_windows.bat. Riippuvuudet menevät omaan .venv-kansioon.
+4. Kun ACC EI OLE KÄYNNISSÄ, suorita run_preflight_no_game.bat.
+5. Aja run_windows.bat. Tämä on vain synteettinen DEMO ilman ACC-yhteyttä.
+6. VASTA jos esitestit ja demo toimivat, voit vapaaehtoisesti testata liveä:
+   käynnistä ACC, siirry harjoitussessiossa radalle ja käynnistä tämän jälkeen
+   run_live_after_acc_loaded.bat. Kokeile ensin paikallaan varikolla.
+   Lopeta heti, jos peli tai ohjelma käyttäytyy poikkeavasti.
+
+EI TARVITSE WINDOWSIN UUDELLEENKÄYNNISTYSTÄ.
+Älä sulje muiden projektien Python-prosesseja tai Rhino-automaattiajoja.
+
+TULOKSET:
+ data\braking_history.jsonl – kolme ERI pistettä: score=vanha 0.2.2,
+ calibration=0.2.3, coaching=0.2.4.1.
+ data\raw_braking_events.jsonl – samojen jarrutusten näytesarjat uudelleen-
+ analysointia varten. Uudet lokit tallennetaan vain ohjelman omaan kansioon.
+ run_replay_offline.bat – laskee 0.2.4.1:n pisteet uudelleen tallenteista.
+
+Täysin suoraan tehty jarrutus voi olla hyvä ajotekniikka.
+Siitä ei anneta trail braking -arvosanaa eikä huonoja pisteitä.
+Ulosajosta johtuvaa ohjausvauriota ohjelma EI tunnista varmasti.
+
+HUOM: Tämä on Windows-livekäytöltään vielä TESTIVERSIO. Vaikka 0.2.3 toimi,
+se ei yksin vahvista uuden 0.2.4.1-version virheettömyyttä.
