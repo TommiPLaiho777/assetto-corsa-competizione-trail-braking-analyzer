@@ -1,3 +1,23 @@
+# 0.2.5.3 - Persistent Mini HUD drag grip
+
+The proven 0.2.5.2 rapid-corner timings, assessment rules, telemetry reader, and
+logging are unchanged. An unobtrusive `≡` drag grip now remains clickable at
+the top-left of the fully transparent Mini HUD even after the score and comment
+expire. Drag the grip with the left mouse button to reposition the HUD, or drag
+visible score/comment text as before. The grip is the only control with a tiny
+semi-opaque hit-test background; the score and feedback remain unboxed. The
+position is still saved by Qt. `−` and `×` continue to work independently.
+
+**Not included:** track position, apex detection or a racing-line grade. Those
+need separately validated read-only ACC graphics telemetry and comparison
+with matching laps. Do not label steering-only data as a missed apex.
+
+No native Windows/ACC user test of this particular drag fix has yet occurred.
+Test the grip in `run_windows.bat` demo before opening ACC, ideally while the
+number/comment are empty after automatic expiry.
+
+---
+
 **0.2.5.1 QUICK HUD UPDATE:** The Mini HUD keeps exactly the same appearance, drag placement, independent minimize/close and message colors. The final-score observation is shortened from 3.0 to 2.6 seconds, and the steady straight-ish display gate is shortened from 0.48 to 0.24 seconds (steer/yaw/brake/speed safety thresholds unchanged). In the 68 privately supplied ACC braking events, offline recalculation with 2.6 seconds preserved all 68 previous 0.2.5 scores. This is empirical evidence only, not a guarantee for future corners. The same 0.2.4.1 scoring rules and same read-only ACC memory reader are retained. The HUD still waits for straight-ish driving and may be delayed on winding sections.
 
 **0.2.5 UPDATE:** A transparent Mini HUD and optional always-on-top detailed window have been added. Scoring and ACC memory handling are unchanged. Full information in the 0.2.5 section below.
@@ -129,3 +149,70 @@ low-distraction cockpit/instrument-panel area of the display, not where it block
 the next braking reference or apex. Its position persists through QSettings.
 The mini window has its own minimize and close controls; reopen from the full
 GUI. The detailed GUI may stay minimized during driving.
+
+## 0.2.5.2 – Rapid-corner glance HUD
+
+The Mini HUD now displays a **short-lived provisional result** soon after brake
+release (typically ~0.2 s), not 2.6+ seconds after the event. It may update
+**in place** after early exit evidence, but the full coaching result and logs
+remain authoritative. It clears in approximately 0.9–1.35 s (and no later
+than 1.95 s after release), or immediately when another braking event starts.
+No late final result pops up during a following corner. The Mini HUD frame,
+alpha background, small minimize/close buttons, and optional always-on-top
+detailed window are unchanged. See `RELEASE_NOTES_V0252.md` for detail.
+
+*Important:* An early score is provisional and must not be mistaken for
+proof of corner exit, apexs or fastest racing line. Watch the road, then
+inspect the number only when attention permits. The earlier sections above
+refer to the archived 0.2.5/0.2.5.1 presentation behavior.
+
+## Optional text-only Line Coach research
+
+See [`LINE_COACH_RESEARCH_FI.md`](LINE_COACH_RESEARCH_FI.md). This experimental
+module reads ACC's graphics **read-only** and measures the car's distance from
+a locally installed `fastlane.ai` AI reference. **It has not been validated
+on the user's Windows ACC and is NOT wired into Mini HUD scoring or timing.**
+No graphical racing-line display is added. No ACC game assets are redistributed.
+
+
+## 0.3.1 – optional Nürburgring 24h corner names (experimental)
+
+Adds only a brief corner label to the existing Mini HUD (example **BERGWERK**)
+when the app can match repeated ACC read-only graphics coordinates to the
+locally installed `fastlane.ai` and RaceIQ segment fractions. The original
+0.2.5.2 rapid-corner timing, braking grades, ACC physics reader, and Mini HUD
+transparent surface / drag grip are unchanged. If the named turn cannot be
+validated at the instant of brake release, the score and normal short feedback
+appear **without a corner name**. No apex or optimal-line claims are made.
+
+To opt in after extracting to a NEW Windows folder:
+
+1. `install_windows.bat` and `run_preflight_no_game.bat` with ACC closed.
+2. `download_corner_metadata.bat`: obtains two small, external RaceIQ JSON files
+   to the ignored local `data\track_metadata` folder; automatic network access
+   occurs **only when running this script**, not during the game. Alternatively
+   manually place `nordschleife.json` and `nordschleife-segments.json` there.
+3. Drag your existing ACC Nürburgring 24h `fastlane.ai` onto
+   `configure_fastlane.bat`. Only its absolute path is stored. The original
+   game asset is never copied, edited or redistributed.
+4. With ACC already on the Nürburgring 24h circuit, try
+   `run_live_after_acc_loaded.bat`. The detailed window reports whether name
+   alignment has enough evidence. Keep the working v0.2.5.3 folder untouched.
+5. A named event can add an optional `corner` object to the history JSONL,
+   including the turn number and **experimental** source attribution. It does
+   not modify legacy, calibration or coaching scores.
+
+The external metadata is maintained by RaceIQ and licensed separately under
+its repository license (GNU GPL-3.0); it is NOT redistributed in this ZIP or
+included in the GitHub PR. References:
+- https://github.com/SpeedHQ/RaceIQ/blob/main/shared/data/tracks/meta/nordschleife.json
+- https://github.com/SpeedHQ/RaceIQ/blob/main/shared/data/tracks/acc/nordschleife-segments.json
+
+Known limits: RaceIQ's segments are third-party, not confirmed official ACC
+turn ranges. Actual ACC graphics offsets, lap progress and reference alignment
+have **not yet been validated** on the user's Windows ACC. Automatic gating is
+only an initial check, not proof that each name is correct. A 90-second
+`run_line_probe_live.bat` CSV from Windows is still required to validate and
+calibrate name placement before considering the feature production-ready.
+If imported files are absent/bad, ACC graphics cannot be read, or the position
+registration differs, the feature fails closed and ordinary HUD stays working.

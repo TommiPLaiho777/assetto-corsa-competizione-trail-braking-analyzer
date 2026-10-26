@@ -69,3 +69,31 @@ VERSIO 0.2.5.1 — MINI HUDIN NOPEAMPI PALAUTE
 - ACC-muistilukija ja arvosanan laskukaavat eivat muuttuneet.
 - Aja install_windows.bat ja run_preflight_no_game.bat ennen livekoetta.
 - Erillinen v0.2.5-kansio kannattaa sailyttaa varmuuskopiona.
+
+Versio 0.2.5.2: Mini HUDin nopea palaute
+---------------------------------------
+- Jarrun vapautuksen jalkeen lyhyt ALUSTAVA numero + kommentti noin 0,2 s.
+- Mahdollinen tarkennus samassa ilmoituksessa, jos ulostulosta saadaan nayttoa.
+- Ilmoitus sammuu noin 0,9-1,35 s:ssa, enintaan 1,95 s vapautuksesta.
+- Seuraavan jarrutuksen alkaessa vanha ilmoitus tyhjennetaan.
+- Myohemmin laskettu lopullinen arvosana jaa laajaan GUIhin ja lokiin.
+- Kokeile aluksi run_preflight_no_game.bat ja run_windows.bat (demo).
+- Tassa versiossa ei ole muutettu ACC-muistilukijaa.
+
+
+VERSIO 0.3.1 – NURBURGRING 24H -MUTKIEN NIMET (KOKEELLINEN)
+1. Säilytä toimiva 0.2.5.3 omassa kansiossaan; pura 0.3.1 erikseen.
+2. Aja install_windows.bat ja ACC:n ollessa suljettuna run_preflight_no_game.bat.
+3. Aja download_corner_metadata.bat. Ohjelma lataa kaksi RaceIQ:n JSON-metatietoa
+   paikalliseen data\track_metadata -kansioon. Pelin tiedostoja ei muuteta.
+4. Vedä aiemmin löytämäsi Nurburgring 24h fastlane.ai configure_fastlane.bat:n
+   päälle. Siitä tallennetaan vain polku, ei uutta kopiota.
+5. Käynnistä ACC ja lataa Nurburgring 24h -harjoitus, sitten avaa
+   run_live_after_acc_loaded.bat.
+6. Mini HUD näyttää mutkan nimen vain, jos sijaintidata vastaa mittausta.
+   Jos luotettavuus ei riitä, nimi jää pois mutta jarrutusarvio toimii entiseen
+   tapaan. Nimet eivät vielä ole Windows-käytännön testillä varmennettuja.
+   Mahdollinen nimi tallentuu myös ajohistorian corner-kenttään.
+
+HUDin nopeus, numerot, palaute ja raahauskahva ovat samat kuin 0.2.5.3:ssa.
+Ajolinjaan perustuvaa hyvyysarviota tai apeksianalyysiä ei vielä anneta.

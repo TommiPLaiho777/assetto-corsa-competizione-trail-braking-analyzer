@@ -7,6 +7,8 @@ import os
 import sys
 import time
 from datetime import datetime
+from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 from PyQt5.QtCore import Qt, QTimer, QSettings
@@ -22,8 +24,11 @@ from coaching_engine import assess
 from raw_event_store import encode_event
 from stats_ui import BrakingStatsWindow
 from mini_hud import MiniHUD
-from hud_presentation import (describe, safe_straight, POST_RELEASE_OBSERVATION_S,
-                              STEADY_STRAIGHT_S)
+from hud_presentation import describe, POST_RELEASE_OBSERVATION_S
+from hud_rhythm import HUDRhythm, HUDCommand
+from corner_names import CornerCatalog, CornerNameGate, META_DIR, CONFIG_FILE
+from acc_graphics_probe import GraphicsReader
+from line_reference import FastlaneReference
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -35,7 +40,7 @@ class TrailBrakingApp(QMainWindow):
     def __init__(self, mode: str = "demo"):
         super().__init__()
         self.mode = mode
-        self.setWindowTitle(f"Advanced Trail Braking 0.2.5.1 | {mode.upper()} rotation coach")
+        self.setWindowTitle(f"Advanced Trail Braking 0.3.1 | {mode.upper()} rotation coach")
         # Safety hotfix: do not force an overlay above the DirectX game.
         # Use normal desktop/windowed layout during initial validation.
         self.resize(550, 680)
@@ -44,8 +49,8 @@ class TrailBrakingApp(QMainWindow):
         self.setWindowFlags(Qt.Window | Qt.WindowMinimizeButtonHint |
                             Qt.WindowMaximizeButtonHint | Qt.WindowCloseButtonHint)
         self.settings = QSettings('AdvancedTrailBraking', 'RotationCoach')
-        self._pending_hud = None
-        self._straight_since = None
+        self._hud_flow = HUDRhythm()
+        self._early_exit_checked = False
         self.mini_hud = MiniHUD()  # independent top-level window, not a child
         self.mini_hud.visibilityChanged.connect(self._update_hud_button)
         central = QWidget()
@@ -72,6 +77,10 @@ class TrailBrakingApp(QMainWindow):
                              else "LIVE EXPERIMENTAL – waiting for ACC physics data")
         self.status.setStyleSheet("color: #dee6ee; background: #263746; padding: 7px;")
         layout.addWidget(self.status)
+        self.corner_status = QLabel('Corner names: not configured (optional)')
+        self.corner_status.setWordWrap(True)
+        self.corner_status.setStyleSheet('color: #b0ccdf; padding: 3px;')
+        layout.addWidget(self.corner_status)
         self.rating = QLabel("– / 5")
         self.rating.setAlignment(Qt.AlignCenter)
         self.rating.setStyleSheet("font-size: 36px; font-weight: 700; color: #f1c40f;")
@@ -125,6 +134,30 @@ class TrailBrakingApp(QMainWindow):
         # Only explicit --live can instantiate a Windows mapping reader.
         self.acc = (ACCSharedMemory(process_guard=acc_process_running)
                     if self.mode == "live" else DemoSource())
+        self._corner_reader = None
+        self._corner_gate = None
+        self._event_corner = None
+        self._last_corner_status_at = 0.
+        # This is OPTIONAL; no change to the working score, HUD rhythm, or
+        # physics reader. No internet access during live driving.
+        if self.mode == 'live':
+            try:
+                catalog = CornerCatalog.load()
+                path_file = META_DIR / CONFIG_FILE
+                if catalog is not None and path_file.is_file():
+                    original_ai = Path(path_file.read_text(encoding='utf-8').strip())
+                    reference = FastlaneReference.load_v8(original_ai)
+                    if len(reference.xyz) != 5046:
+                        raise ValueError('Not the validated Nurburgring 24h AI route')
+                    self._corner_gate = CornerNameGate(catalog, reference)
+                    self._corner_reader = GraphicsReader(acc_process_running)
+                    self.corner_status.setText('Corner names: waiting for verified live alignment')
+                else:
+                    self.corner_status.setText('Corner names OFF: run download_corner_metadata.bat and configure_fastlane.bat')
+            except (OSError, ValueError, TypeError) as exc:
+                self.corner_status.setText(f'Corner names OFF: {exc}')
+        else:
+            self.corner_status.setText('Corner names: demo never attaches ACC graphics')
         self._offline_since = None
         self.tracker = EventTracker(post_seconds=POST_RELEASE_OBSERVATION_S)
         self.stats = None
@@ -135,6 +168,7 @@ class TrailBrakingApp(QMainWindow):
         if self.check_on_top.isChecked():
             self.set_details_on_top(True)
         # No need to expose the full analysis panel during driving.
+        self.mini_hud.clear_message()
         self.mini_hud.show()
 
     def _update_hud_button(self):
@@ -160,19 +194,54 @@ class TrailBrakingApp(QMainWindow):
         if enabled:
             self.raise_()
 
-    def _maybe_update_hud(self, sample):
-        if self._pending_hud is None:
+    def _with_event_corner(self, message):
+        # Captured at the release, not queried 2.6 seconds later.
+        if self._event_corner is None:
+            return message
+        return replace(message, corner_name=self._event_corner.display_name)
+
+    def _read_corner_position(self):
+        if self._corner_gate is None or self._corner_reader is None:
             return
-        if not safe_straight(sample):
-            self._straight_since = None
+        now = time.monotonic()
+        try:
+            graphics = self._corner_reader.read()
+            self._corner_gate.observe(graphics, now)
+        except (OSError, ValueError, TypeError, OverflowError):
+            self._corner_gate.reset()
+        if now - self._last_corner_status_at > 1.5:
+            self._last_corner_status_at = now
+            self.corner_status.setText('Corner names: ' + self._corner_gate.status)
+
+    def _apply_hud_command(self, command: HUDCommand):
+        if command.kind == 'show' and command.message is not None:
+            self.mini_hud.set_message(command.message)
+        elif command.kind == 'clear':
+            self.mini_hud.clear_message()
+
+    def _maybe_revise_early_exit(self, sample):
+        """Optional one-time refresh using measured 1.2s of exit telemetry.
+
+        It remains an EARLY estimate, not the authoritative completed result.
+        No scoring formula or raw event log is changed.
+        """
+        if self._early_exit_checked or self.tracker.state != 'exit':
             return
-        if self._straight_since is None:
-            self._straight_since = sample.time
+        if sample.time - self.tracker.release_time < 1.22:
             return
-        if sample.time - self._straight_since >= STEADY_STRAIGHT_S:
-            self.mini_hud.set_message(self._pending_hud)
-            self._pending_hud = None
-            self._straight_since = None
+        self._early_exit_checked = True
+        try:
+            early = assess(tuple(self.tracker.samples), self.tracker.release_index,
+                           phase='final')
+            early_text = describe(early)
+            if early.score == 5:
+                # Short-lived, partial-exit evidence is not a final proof.
+                from hud_presentation import HUDMessage
+                early_text = HUDMessage(early_text.grade, 'Good exit so far',
+                                        early_text.number_color, early_text.text_color)
+            self._apply_hud_command(self._hud_flow.revise(self._with_event_corner(early_text), sample.time))
+        except (ValueError, TypeError, OverflowError, FloatingPointError):
+            pass
 
     def on_tick(self):
         sample = self.acc.read()
@@ -183,9 +252,17 @@ class TrailBrakingApp(QMainWindow):
                 elif time.monotonic() - self._offline_since > 3.0:
                     # Never blend event histories across lost ACC sessions.
                     self.tracker.reset()
+                    self._apply_hud_command(self._hud_flow.reset())
+                    self._early_exit_checked = False
+                    if self._corner_gate is not None:
+                        self._corner_gate.reset()
+                    self._event_corner = None
                 self.status.setText(self.acc.connect_error or "Waiting for ACC physics frame…")
+            # A lost telemetry feed must not leave old feedback on screen.
+            self._apply_hud_command(self._hud_flow.tick(time.monotonic()))
             return
         self._offline_since = None
+        self._read_corner_position()
         prefix = "SYNTHETIC DEMO" if self.mode == "demo" else "ACC LIVE (EXPERIMENTAL)"
         self.status.setText(f"{prefix} | {sample.speed_kph:.0f} km/h | "
                             f"Brake {sample.brake * 100:.0f}% | "
@@ -203,13 +280,19 @@ class TrailBrakingApp(QMainWindow):
                 except (ValueError, TypeError, OverflowError, FloatingPointError) as exc:
                     self.coaching_status.setText(f"Coaching unavailable: {exc}")
             self.show_feedback(feedback, coach)
+            if feedback.phase == "provisional":
+                elapsed = (completed[0][-1].time - completed[0][0].time
+                           if completed is not None and completed[0] else 0.0)
+                self._event_corner = (self._corner_gate.candidate(time.monotonic())
+                                      if self._corner_gate is not None else None)
+                self._hud_flow.new_release(self._with_event_corner(describe(coach)), sample.time, elapsed)
+                self._early_exit_checked = False
             if feedback.phase == "final":
                 calibration = None
-                # Mini HUD never draws a provisional grade. It holds the final
-                # result until a straight-ish low-brake interval is observed.
-                # The large detailed GUI continues to show full evidence.
-                self._pending_hud = describe(coach)
-                self._straight_since = None
+                # The detailed window/history gets the authoritative final
+                # result. The glance HUD may UPDATE an existing notice, but
+                # must never pop up a stale late result after the next corner.
+                self._apply_hud_command(self._hud_flow.revise(self._with_event_corner(describe(coach)), sample.time))
                 calibration = None
                 if completed is not None:
                     try:
@@ -218,8 +301,11 @@ class TrailBrakingApp(QMainWindow):
                         # Preserve main coach result even if older shadow fails.
                         pass
                 self.save_event(feedback, calibration, coach, completed)
-        # Display is deliberately delayed, not the underlying score.
-        self._maybe_update_hud(sample)
+        # Newest event wins. Never wait for a fully straight vehicle; a new
+        # brake automatically hides the previous corner's short feedback.
+        self._maybe_revise_early_exit(sample)
+        self._apply_hud_command(self._hud_flow.tick(
+            sample.time, braking_active=(self.tracker.state == 'braking')))
         # Live plots are throttled independently of telemetry capture.
         now = time.monotonic()
         if now - self._last_draw >= 0.12:
@@ -278,6 +364,11 @@ class TrailBrakingApp(QMainWindow):
         if coaching is not None:
             entry["coaching"] = coaching.as_log()
         entry["timestamp"] = name
+        if self._event_corner is not None:
+            entry['corner'] = {'name': self._event_corner.display_name,
+                               'turn_number': self._event_corner.number,
+                               'source': 'RaceIQ experimental ACC segments',
+                               'alignment': 'candidate; Windows validation pending'}
         try:
             with open(history, "a", encoding="utf-8") as fp:
                 fp.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -312,10 +403,12 @@ class TrailBrakingApp(QMainWindow):
             if os.path.exists(raw):
                 os.replace(raw, os.path.join(target, f"raw_braking_events_{stamp}.jsonl"))
             self.tracker.reset()
-            self._pending_hud = None
-            self._straight_since = None
-            from hud_presentation import HUDMessage
-            self.mini_hud.set_message(HUDMessage(None, 'Waiting for completed corner', '#BEC9D6', '#BEC9D6'))
+            self._apply_hud_command(self._hud_flow.reset())
+            self._early_exit_checked = False
+            self._event_corner = None
+            if self._corner_gate is not None:
+                self._corner_gate.reset()
+            self.mini_hud.clear_message()
             self.rating.setText("– / 5")
             self.diagnosis.setText("NEW STINT")
             self.detail.setText("Previous event log archived safely in data/.")
@@ -331,6 +424,8 @@ class TrailBrakingApp(QMainWindow):
     def closeEvent(self, event):
         self.timer.stop()
         self.acc.close()
+        if self._corner_reader is not None:
+            self._corner_reader.close()
         self.mini_hud.close()
         super().closeEvent(event)
 
@@ -345,7 +440,7 @@ class TrailBrakingApp(QMainWindow):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Advanced Trail Braking v0.2.5")
+    parser = argparse.ArgumentParser(description="Advanced Trail Braking v0.3.1")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--demo", action="store_true", help="Synthetic UI demo; never opens ACC memory")
     mode.add_argument("--live", action="store_true", help="Experimental read-only ACC integration")

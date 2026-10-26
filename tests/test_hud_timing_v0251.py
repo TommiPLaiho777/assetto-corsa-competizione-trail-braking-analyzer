@@ -20,13 +20,14 @@ class TestHudTiming(unittest.TestCase):
         s2 = TelemetrySample(1, 2, 90, .0, .4, .03, .04)
         self.assertTrue(safe_straight(s2))
 
-    def test_main_uses_named_thresholds_for_both_paths(self):
+    def test_legacy_window_retained_for_full_analysis_only(self):
         code = (Path(__file__).parent.parent / 'main.py').read_text('utf-8')
         ast.parse(code)
         self.assertIn('EventTracker(post_seconds=POST_RELEASE_OBSERVATION_S)', code)
-        self.assertIn('sample.time - self._straight_since >= STEADY_STRAIGHT_S', code)
-        self.assertIn('self._pending_hud = describe(coach)', code)
-        self.assertNotIn('self.mini_hud.set_message(describe(coach))', code)
+        self.assertIn('self._hud_flow.new_release(self._with_event_corner(describe(coach))', code)
+        self.assertIn('self._hud_flow.tick(', code)
+        self.assertNotIn('self._pending_hud', code)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,7 +1,8 @@
 """Detached, frameless alpha-layer Qt HUD with its own minimize/close buttons.
 
 Does not poll telemetry or access ACC: it only receives finalized messages.
-Users can move the text by dragging it. No full-window opaque rectangle.
+Users can drag the text or a persistent small grip after the short feedback clears.
+The numeral/feedback remain fully unboxed on the transparent alpha window.
 """
 from __future__ import annotations
 
@@ -32,6 +33,14 @@ class MiniHUD(QWidget):
         root.setSpacing(0)
         controls = QHBoxLayout()
         controls.setContentsMargins(0, 0, 0, 0)
+        # Windows may treat fully transparent blank pixels as mouse-transparent.
+        # The brief feedback disappears between corners, so give the user a
+        # small *permanently hit-testable* grip for moving the HUD while idle.
+        self.drag_handle = self._control('≡', 'Drag Mini HUD from here')
+        self.drag_handle.setObjectName('MiniDragHandle')
+        self.drag_handle.setFixedSize(36, 30)
+        self.drag_handle.setCursor(Qt.OpenHandCursor)
+        controls.addWidget(self.drag_handle)
         controls.addStretch(1)
         self.min_button = self._control('−', 'Minimize Mini HUD')
         self.close_button = self._control('×', 'Close Mini HUD (reopen from detailed window)')
@@ -54,11 +63,22 @@ class MiniHUD(QWidget):
         self.feedback.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.feedback.setWordWrap(True)
         self.feedback.setFont(QFont('Segoe UI', 16, QFont.DemiBold))
+        self.corner_name = QLabel('')
+        self.corner_name.setObjectName('MiniCornerName')
+        self.corner_name.setFont(QFont('Segoe UI', 13, QFont.DemiBold))
+        self.corner_name.setStyleSheet('background: transparent; border: none; color: #E5F0F8;')
+        self.corner_name.setAlignment(Qt.AlignLeft | Qt.AlignBottom)
+        self.corner_name.setVisible(False)
+        right = QVBoxLayout()
+        right.setSpacing(0)
+        right.setContentsMargins(0, 0, 0, 0)
+        right.addWidget(self.corner_name)
+        right.addWidget(self.feedback, stretch=1)
         line.addWidget(self.number)
-        line.addWidget(self.feedback, stretch=1)
+        line.addLayout(right, stretch=1)
         root.addLayout(line, stretch=1)
 
-        for item in (self.number, self.feedback):
+        for item in (self.number, self.feedback, self.corner_name):
             item.setStyleSheet('background: transparent; border: none;')
             shadow = QGraphicsDropShadowEffect(item)
             shadow.setBlurRadius(8)
@@ -66,6 +86,10 @@ class MiniHUD(QWidget):
             shadow.setColor(QColor(0, 0, 0, 245))
             item.setGraphicsEffect(shadow)
             item.installEventFilter(self)
+        # Install the grip filter LAST. Qt can synchronously deliver events
+        # while constructing a widget; eventFilter needs all these
+        # attributes to exist before inspecting mouse events.
+        self.drag_handle.installEventFilter(self)
         # All HUD content paints on Qt's transparent surface. Never use the
         # global app theme's opaque QWidget background on this top-level.
         self.setStyleSheet('''
@@ -75,7 +99,20 @@ class MiniHUD(QWidget):
                 color: rgba(233,240,246,205); font-size: 21px;
                 font-weight: 700; padding: 0px; }
             QToolButton:hover { color: white; }
+            QToolButton#MiniDragHandle {
+                background: rgba(28, 43, 58, 205);
+                border: none;
+                border-radius: 7px;
+                color: rgba(233, 240, 246, 220);
+                font-size: 23px;
+            }
+            QToolButton#MiniDragHandle:hover {
+                background: rgba(45, 65, 83, 235);
+                color: white;
+            }
         ''')
+        self.corner_name.setFont(QFont('Segoe UI', 16, QFont.Bold))
+        self.corner_name.setStyleSheet('background: transparent; border: none; color: #FFFFFF;')
         self.set_message(HUDMessage(None, 'Waiting for completed corner', '#BEC9D6', '#BEC9D6'))
         self._place_initially()
 
@@ -100,16 +137,32 @@ class MiniHUD(QWidget):
                 self.move(geo.right() - self.width() - 32, geo.top() + 75)
 
     def set_message(self, msg: HUDMessage):
+        self.corner_name.setText(msg.corner_name.upper() if msg.corner_name else '')
+        self.corner_name.setVisible(bool(msg.corner_name))
         self.number.setText(msg.number)
         self.number.setStyleSheet('background: transparent; border: none; color: ' + msg.number_color + ';')
         self.feedback.setText(msg.text)
         self.feedback.setStyleSheet('background: transparent; border: none; color: ' + msg.text_color + ';')
 
+    def clear_message(self):
+        """Keep the HUD window draggable/closable, but clear idle feedback."""
+        self.number.clear()
+        self.feedback.clear()
+        self.corner_name.clear()
+        self.corner_name.setVisible(False)
+
     def eventFilter(self, source, event):
-        if source in (self.number, self.feedback):
+        # The grip is reachable even when the text has expired. Dragging the
+        # numeral/diagnosis still works whenever Windows hit-tests those pixels.
+        if source in (getattr(self, 'number', None),
+                      getattr(self, 'feedback', None),
+                      getattr(self, 'corner_name', None),
+                      getattr(self, 'drag_handle', None)):
             if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
                 self._drag_origin = event.globalPos()
                 self._window_origin = self.pos()
+                if source is self.drag_handle:
+                    self.drag_handle.setCursor(Qt.ClosedHandCursor)
                 return True
             if event.type() == QEvent.MouseMove and self._drag_origin is not None:
                 self.move(self._window_origin + event.globalPos() - self._drag_origin)
@@ -117,6 +170,8 @@ class MiniHUD(QWidget):
             if event.type() == QEvent.MouseButtonRelease and self._drag_origin is not None:
                 self._drag_origin = None
                 self._window_origin = None
+                if source is self.drag_handle:
+                    self.drag_handle.setCursor(Qt.OpenHandCursor)
                 from PyQt5.QtCore import QSettings
                 QSettings('AdvancedTrailBraking', 'RotationCoach').setValue('miniHudPos', self.pos())
                 return True

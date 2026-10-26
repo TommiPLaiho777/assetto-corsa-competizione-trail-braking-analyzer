@@ -30,6 +30,19 @@ class MiniHudQtTests(unittest.TestCase):
         finally:
             w.close()
 
+    def test_auto_expiry_clears_only_text_not_close_controls(self):
+        from hud_presentation import HUDMessage
+        w=MiniHUD()
+        try:
+            w.set_message(HUDMessage(4, 'Review', '#fff', '#fff'))
+            w.clear_message()
+            self.assertEqual(w.number.text(), '')
+            self.assertEqual(w.feedback.text(), '')
+            self.assertEqual(w.min_button.text(), '−')
+            self.assertEqual(w.close_button.text(), '×')
+        finally:
+            w.close()
+
     def test_minimize_and_close_independent(self):
         w=MiniHUD()
         try:

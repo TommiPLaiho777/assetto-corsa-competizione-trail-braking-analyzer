@@ -34,6 +34,7 @@ class HUDMessage:
     text: str
     number_color: str
     text_color: str
+    corner_name: str = ''  # optional experimental, validated name
 
     @property
     def number(self) -> str:

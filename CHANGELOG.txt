@@ -33,3 +33,14 @@
 - No unmeasured apex or racing-line claims
 - Safe 0.2.4.1 ACC reader, coaching and saved-event schema left unchanged
 - Additional offline decision and optional Qt smoke tests
+
+0.2.5.2  Rapid-corner glance feedback: provisional HUD ~0.2s after release,
+         optional in-place early-exit revision, adaptive short dwell, auto-clear,
+         next-brake cancellation, final score stays in detailed GUI/history.
+         No changes to ACC memory, event scoring or raw data format.
+
+0.3.1 - Experimental ACC Nurburgring 24h corner names
+- Optional external JSON downloader, original fastlane.ai path registration
+- Cautious matching from read-only graphics; suppress name if uncertain
+- Small separate corner name on Mini HUD and optional history metadata
+- No changes to scoring, ACC physics reader, HUD rhythm or visible duration
