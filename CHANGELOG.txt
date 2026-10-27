@@ -1,0 +1,53 @@
+0.2.5.1 (2026-10-20): Quicker final HUD after corners. Observation 3.0 -> 2.6 s; steady display 0.48 -> 0.24 s. Controls, colors, scoring formulas and memory reader unchanged. 68/68 private replays matched previous results.
+0.2.4.1 – Scoring hotfix
+- Initial progressive brake application is NO LONGER incorrectly counted as brake reapplications.
+- Reapplications require an actual >8.5% pressure rise AFTER the first brake peak.
+- Re-evaluate old 0.2.4 raw JSONL logs offline; do not overwrite them.
+- ACC telemetry reader acc_memory.py is BYTE IDENTICAL to 0.2.4/0.2.3.
+- No game write access, no new runtime integrations.
+
+0.2.4 – Rotation / Exit Coach
+- 0.2.4 technique grade is now primary, provisional immediately on release;
+  final revised after up to 3 seconds of post-release observation.
+- Original 0.2.2 score and 0.2.3 shadow remain saved separately and untouched.
+- V5 requires controlled taper during steering, stable yaw, low high-brake
+  overlap, little coasting, and some measured acceleration after release.
+- Differentiate straight braking, brake-before-turn, in-corner high brake,
+  unstable yaw, neutral-pedal coasting, and low-speed non-scoring events.
+- 0.2.4 new logs contain full measured telemetry in separate replay JSONL;
+  no retrospective re-grading of old metrics-only logs without raw evidence.
+- ACC shared memory reader stays BYTE-IDENTICAL to working 0.2.3 build.
+- Live test still required on Windows; no reboot / CI interruption needed.
+- 55 offline tests, one Windows-only test skipped on Linux.
+
+0.2.3 – Calibration / Shadow scoring
+- Independent shadow scoring next to original 0.2.2 grades.
+- 0.2.2 known-safe read-only decoder, guard and launch modes unchanged.
+
+0.2.5 — Independent transparent Mini HUD
+- Borderless alpha-layer single large grade + short text; per-item color coding
+- Tiny minimize/close controls; draggable, remembers last position
+- Reopen from detailed GUI even after HUD has been closed/minimized
+- Detailed GUI native minimize and user-controlled always-on-top setting
+- Final HUD feedback delayed until measurable post-corner straight-ish driving
+- No unmeasured apex or racing-line claims
+- Safe 0.2.4.1 ACC reader, coaching and saved-event schema left unchanged
+- Additional offline decision and optional Qt smoke tests
+
+0.2.5.2  Rapid-corner glance feedback: provisional HUD ~0.2s after release,
+         optional in-place early-exit revision, adaptive short dwell, auto-clear,
+         next-brake cancellation, final score stays in detailed GUI/history.
+         No changes to ACC memory, event scoring or raw data format.
+
+0.3.1 - Experimental ACC Nurburgring 24h corner names
+- Optional external JSON downloader, original fastlane.ai path registration
+- Cautious matching from read-only graphics; suppress name if uncertain
+- Small separate corner name on Mini HUD and optional history metadata
+- No changes to scoring, ACC physics reader, HUD rhythm or visible duration
+
+0.3.1.1 - Fix Mini HUD initialization order; mouse filter installed after widget setup.
+
+## 0.3.1.2 - corner-name alignment and configuration diagnostics
+* The lap-zero offset no longer prevents verified names.
+* diagnose_corner_names.bat checks optional data dependencies.
+* No changes to HUD timings, scoring or ACC reader.

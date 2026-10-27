@@ -1,303 +1,604 @@
-import sys
-import os
+"""Advanced Trail Braking – live ACC coaching dashboard (Windows)."""
+from __future__ import annotations
+
+import argparse
 import json
-import numpy as np
+import os
+import sys
+import time
 from datetime import datetime
+from dataclasses import replace
+from pathlib import Path
 
-# ==============================================================================
-# #CORE_SYSTEM #SAFE_INITIALIZATION #NO_LISTS
-# Safe QApplication startup bypassing redundant memory allocations
-# ==============================================================================
-from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QPushButton, QDesktopWidget
-from PyQt5.QtCore import QTimer, Qt
+import numpy as np
+from PyQt5.QtCore import Qt, QTimer, QSettings
+from PyQt5.QtWidgets import (QApplication, QCheckBox, QHBoxLayout, QLabel, QMainWindow,
+                             QMessageBox, QPushButton, QVBoxLayout, QWidget)
 import pyqtgraph as pg
-import pyqtgraph.exporters
 
-from acc_memory import ACCSharedMemory
+from acc_memory import acc_process_running
+from acc_gear_reader import GearAwareACCSharedMemory
+from demo_source import DemoSource
+from advanced_engine import EventTracker, Feedback
+from calibration_engine import calibrate_live
+from coaching_engine import assess
+from raw_event_store import encode_event
 from stats_ui import BrakingStatsWindow
+from mini_hud import MiniHUD
+from hud_presentation import describe, POST_RELEASE_OBSERVATION_S
+from hud_rhythm import HUDRhythm, HUDCommand
+from corner_names import CornerCatalog, CornerNameGate, META_DIR, CONFIG_FILE
+from acc_graphics_probe import GraphicsReader
+from line_reference import FastlaneReference
+from pedal_overlap import PedalOverlapMonitor
+from pedal_blip_filter import DownshiftBlipFilter
+from overlap_session_stats import OverlapSessionStats
+from line_recorder import LineRecorder
 
-app = QApplication.instance()
-if app is None:
-    app = QApplication(sys.argv)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+HISTORY = os.path.join(DATA_DIR, "braking_history.jsonl")
+IMAGES = os.path.join(BASE_DIR, "images")
 
-# ==============================================================================
-# #MAIN_APP #TELEMETRY_DASHBOARD #DYNAMIC_ENGINE
-# Completely dynamic telemetry analyzer avoiding Python lists and hardcoding
-# ==============================================================================
+
 class TrailBrakingApp(QMainWindow):
-    
-    # #CONFIGURATION_MATRIX #DYNAMIC_VARIABLES
-    # Replacing all hardcoded magic numbers with configurable constants
-    REFRESH_RATE_HZ = 50
-    TIMER_INTERVAL_MS = int(1000 / REFRESH_RATE_HZ)
-    BUFFER_SIZE = 5000  # Accommodates up to 100 seconds of continuous cornering at 50Hz
-    MIN_SPEED_KPH = 30.0
-    MIN_BRAKE_PERCENT = 5.0
-    RELEASE_BRAKE_PERCENT = 1.0
-    ELASTIC_BASE_MAX = 100.0
-    
-    # Paths calculated dynamically based on current working directory
-    BASE_DIR = os.getcwd()
-    DATA_DIR = os.path.join(BASE_DIR, "data")
-    IMG_DIR = os.path.join(BASE_DIR, "images")
-    HISTORY_FILE = os.path.join(DATA_DIR, "braking_history.jsonl")
-
-    # State enumerations (avoiding string hardcoding in state machine)
-    STATE_IDLE = 0
-    STATE_RECORDING = 1
-    STATE_WAITING = 2
-
-    def __init__(self):
+    def __init__(self, mode: str = "demo"):
         super().__init__()
-        
-        # #UI_SETUP #DYNAMIC_SCALING
-        self.setWindowTitle("Pro Physics Analyzer - Left Foot Trail Braking")
-        self.setWindowFlags(Qt.WindowStaysOnTopHint)
-        
-        # Calculating window size mathematically relative to current screen resolution
-        screen_geometry = QDesktopWidget().availableGeometry()
-        dynamic_width = int(screen_geometry.width() * 0.25)
-        dynamic_height = int(screen_geometry.height() * 0.55)
-        self.resize(dynamic_width, dynamic_height)
-        
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        layout = QVBoxLayout(central_widget)
-        layout.setContentsMargins(0, 0, 0, 0)
-        
-        # #GRAPH_SETUP #PYQTGRAPH_CONFIG
-        self.plot = pg.PlotWidget(background='k')
-        layout.addWidget(self.plot)
-        self.plot.setAspectLocked(True)
-        self.plot.showGrid(x=True, y=True, alpha=0.3)
-        self.plot.setMouseEnabled(x=False, y=False)
-        self.plot.setLabel('bottom', 'Steering (Elastic %)')
-        self.plot.setLabel('left', 'Left Foot Brake Pressure (Elastic %)')
-        
-        # #VISUALIZATION #REFERENCE_CURVE #DYNAMIC_RESOLUTION
-        # Generating the ideal curve with resolution relative to window width
-        self.ideal_curve = self.plot.plot(np.empty(0), np.empty(0), pen=pg.mkPen(color='r', width=3, style=Qt.DashLine))
-        ref_resolution = max(10, int(dynamic_width * 0.5))
-        ref_x = np.linspace(0, self.ELASTIC_BASE_MAX, ref_resolution)
-        ref_y = self.ELASTIC_BASE_MAX * np.sqrt(np.clip(1.0 - (ref_x / self.ELASTIC_BASE_MAX)**2, 0, None))
-        self.ideal_curve.setData(ref_x, ref_y)
-        
-        self.actual_curve = self.plot.plot(np.empty(0), np.empty(0), pen=pg.mkPen(color='g', width=4))
-        
-        # #UI_ELEMENTS #HUD_OVERLAYS
-        self.score_text = pg.TextItem("", color='#f1c40f', anchor=(0.5, 0.5))
-        dynamic_text_pos = int(self.ELASTIC_BASE_MAX * 0.5)
-        self.score_text.setPos(dynamic_text_pos, dynamic_text_pos) 
-        font = self.score_text.textItem.font()
-        font.setPointSize(int(dynamic_width * 0.15)) # Font scales with window width
-        font.setBold(True)
-        self.score_text.textItem.setFont(font)
-        self.plot.addItem(self.score_text)
+        self.mode = mode
+        self.setWindowTitle(f"Advanced Trail Braking 0.3.5.2 | {mode.upper()} rotation coach")
+        # Safety hotfix: do not force an overlay above the DirectX game.
+        # Use normal desktop/windowed layout during initial validation.
+        self.resize(550, 720)
+        # Native Windows title bar: its normal minimize control is retained.
+        # Detailed GUI stays on top ONLY when the user explicitly requests it.
+        self.setWindowFlags(Qt.Window | Qt.WindowMinimizeButtonHint |
+                            Qt.WindowMaximizeButtonHint | Qt.WindowCloseButtonHint)
+        self.settings = QSettings('AdvancedTrailBraking', 'RotationCoach')
+        self._hud_flow = HUDRhythm()
+        self._early_exit_checked = False
+        self.mini_hud = MiniHUD()  # independent top-level window, not a child
+        self.mini_hud.visibilityChanged.connect(self._update_hud_button)
+        self.pedal_overlap = PedalOverlapMonitor()
+        self.pedal_blip_filter = DownshiftBlipFilter()
+        self.overlap_session = OverlapSessionStats()
+        self.line_recorder = LineRecorder(DATA_DIR)
+        self._line_recorder_status_at = 0.0
+        central = QWidget()
+        central.setObjectName('MainCentral')
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
 
-        self.btn_stats = QPushButton("Show Physics Stats")
-        self.btn_stats.setStyleSheet("background-color: #34495e; color: white; padding: 10px; font-weight: bold; margin: 0 5px;")
+        window_controls = QHBoxLayout()
+        self.btn_hud = QPushButton('Hide Mini HUD')
+        self.btn_hud.setToolTip('Show, restore, or hide the independent transparent Mini HUD')
+        self.btn_hud.clicked.connect(self.toggle_hud)
+        window_controls.addWidget(self.btn_hud)
+        self.btn_minimize_details = QPushButton('− Minimize details')
+        self.btn_minimize_details.clicked.connect(self.showMinimized)
+        window_controls.addWidget(self.btn_minimize_details)
+        layout.addLayout(window_controls)
+        self.check_on_top = QCheckBox('Keep detailed GUI on top')
+        self.check_on_top.setToolTip('The main analysis window floats on top only while checked. Use ACC borderless/windowed mode for overlays.')
+        self.check_on_top.setChecked(self.settings.value('detailsAlwaysOnTop', False, type=bool))
+        self.check_on_top.toggled.connect(self.set_details_on_top)
+        layout.addWidget(self.check_on_top)
+        self.check_pedal_overlap = QCheckBox('Pedal overlap light (experimental)')
+        self.check_pedal_overlap.setToolTip('Red: significant gas+brake overlap. Short overlaps only counted as micro. Verified downshift blips filtered. Grades unchanged.')
+        self.check_pedal_overlap.setChecked(self.settings.value('pedalOverlapEnabled', True, type=bool))
+        self.check_pedal_overlap.toggled.connect(self._set_pedal_light_enabled)
+        layout.addWidget(self.check_pedal_overlap)
+        # One unobtrusive live summary in the details panel; NOT in the alpha Mini HUD.
+        # Denominator is completed brake-to-throttle transfers, not running time.
+        self.overlap_session_label = QLabel(self.overlap_session.summary().label())
+        self.overlap_session_label.setWordWrap(True)
+        self.overlap_session_label.setToolTip(
+            'Significant overlap: strong >=0.24s, medium >=0.36s, or light >=0.60s. '
+            'Short overlap (micro) is tracked separately without a red flash. '
+            'Confirmed downshift auto-blips are filtered. Percent is per completed '
+            'brake-to-throttle transition, not percent of driving time. '
+            'Archive & New Stint resets counts.')
+        self.overlap_session_label.setStyleSheet(
+            'color: #e8f0f5; background: #263746; padding: 7px; font-weight: 600;')
+        layout.addWidget(self.overlap_session_label)
+
+        # Optional, track-agnostic recording. Only the existing read-only
+        # graphics probe and physics sample feed this module. No Mini HUD changes.
+        self.check_line_recorder = QCheckBox('Record driving line (live ACC)')
+        self.check_line_recorder.setToolTip(
+            'Write valid on-track XYZ, progress, speed and pedal data to '
+            'data/line_trace.csv. Not available in demo. No AI-line grading.')
+        self.check_line_recorder.setChecked(
+            self.mode == 'live' and self.settings.value('lineRecorderEnabled', True, type=bool))
+        self.check_line_recorder.setEnabled(self.mode == 'live')
+        self.check_line_recorder.toggled.connect(self._set_line_recorder_enabled)
+        layout.addWidget(self.check_line_recorder)
+        self.line_recorder_status = QLabel('Line Recorder: ' + (
+            'Waiting for on-track ACC coordinates' if self.mode == 'live'
+            else 'Disabled in demo (no game position)'))
+        self.line_recorder_status.setWordWrap(True)
+        self.line_recorder_status.setStyleSheet('color: #afd7c8; padding: 3px;')
+        layout.addWidget(self.line_recorder_status)
+
+        self.status = QLabel("SAFE DEMO – synthetic data only" if mode == "demo"
+                             else "LIVE EXPERIMENTAL – waiting for ACC physics data")
+        self.status.setStyleSheet("color: #dee6ee; background: #263746; padding: 7px;")
+        layout.addWidget(self.status)
+        self.corner_status = QLabel('Corner names: not configured (optional)')
+        self.corner_status.setWordWrap(True)
+        self.corner_status.setStyleSheet('color: #b0ccdf; padding: 3px;')
+        layout.addWidget(self.corner_status)
+        self.rating = QLabel("– / 5")
+        self.rating.setAlignment(Qt.AlignCenter)
+        self.rating.setStyleSheet("font-size: 36px; font-weight: 700; color: #f1c40f;")
+        layout.addWidget(self.rating)
+        self.diagnosis = QLabel("ADVANCED: Brake + Steering + Measured Yaw")
+        self.diagnosis.setAlignment(Qt.AlignCenter)
+        self.diagnosis.setStyleSheet("font-weight: 700; font-size: 15px; color: white;")
+        layout.addWidget(self.diagnosis)
+        self.detail = QLabel("Advanced grade: measured braking, turn-in and rotation. Exit observation follows.")
+        self.detail.setWordWrap(True)
+        self.detail.setStyleSheet("color: #cbd6de; padding: 6px;")
+        layout.addWidget(self.detail)
+
+        # Primary 0.2.4 coaching: immediate preliminary grade, refined after exit.
+        # Legacy 0.2.2 and 0.2.3 shadow are logged separately for comparison.
+        self.coaching_status = QLabel("ADVANCED 0.2.4.1: waiting for first braking event")
+        self.coaching_status.setWordWrap(True)
+        self.coaching_status.setStyleSheet("background: #253b49; color: #bfe5fb; padding: 9px;")
+        layout.addWidget(self.coaching_status)
+        self.legacy_status = QLabel("Legacy 0.2.2: no event yet")
+        self.legacy_status.setStyleSheet("color: #9dafbd; padding: 5px;")
+        layout.addWidget(self.legacy_status)
+
+        self.path_plot = pg.PlotWidget(background="#080d12")
+        self.path_plot.setLabel("bottom", "Absolute steering input", units="%")
+        self.path_plot.setLabel("left", "Brake pedal", units="%")
+        self.path_plot.setXRange(0, 100, padding=0)
+        self.path_plot.setYRange(0, 100, padding=0)
+        self.path_plot.setMouseEnabled(x=False, y=False)
+        self.path_plot.showGrid(x=True, y=True, alpha=.20)
+        self.path_trace = self.path_plot.plot(pen=pg.mkPen("#35d19b", width=2.5))
+        layout.addWidget(self.path_plot, stretch=2)
+
+        self.yaw_plot = pg.PlotWidget(background="#080d12")
+        self.yaw_plot.setLabel("bottom", "Event time", units="s")
+        self.yaw_plot.setLabel("left", "Measured yaw rate", units="deg/s")
+        self.yaw_plot.setMouseEnabled(x=False, y=False)
+        self.yaw_plot.showGrid(x=True, y=True, alpha=.20)
+        self.yaw_trace = self.yaw_plot.plot(pen=pg.mkPen("#52a8f2", width=2.5))
+        layout.addWidget(self.yaw_plot, stretch=1)
+
+        row = QHBoxLayout()
+        self.btn_stats = QPushButton("Event Statistics")
         self.btn_stats.clicked.connect(self.show_stats)
-        layout.addWidget(self.btn_stats)
-        
-        self.btn_reset = QPushButton("Reset Stint Data")
-        self.btn_reset.setStyleSheet("background-color: #c0392b; color: white; padding: 10px; font-weight: bold; margin: 0 5px 5px 5px;")
-        self.btn_reset.clicked.connect(self.reset_data)
-        layout.addWidget(self.btn_reset)
-        
-        # #STATE_MANAGEMENT #MEMORY_PREALLOCATION
-        # Replacing all lists with zeroed pre-allocated NumPy arrays for zero memory fragmentation
-        self.acc = ACCSharedMemory()
-        self.current_state = self.STATE_IDLE
-        
-        self.steer_buffer = np.zeros(self.BUFFER_SIZE)
-        self.brake_buffer = np.zeros(self.BUFFER_SIZE)
-        self.front_load_buffer = np.zeros(self.BUFFER_SIZE)
-        self.front_slip_buffer = np.zeros(self.BUFFER_SIZE)
-        self.data_index = 0
-        
-        self.stats_window = None
-        
-        # #POLLING_SYSTEM #TIMER_EVENT
-        self.update_timer = QTimer()
-        self.update_timer.timeout.connect(self.update_data)
-        self.update_timer.start(self.TIMER_INTERVAL_MS)
+        self.btn_reset = QPushButton("Archive & New Stint")
+        self.btn_reset.clicked.connect(self.archive_stint)
+        row.addWidget(self.btn_stats)
+        row.addWidget(self.btn_reset)
+        layout.addLayout(row)
 
-    # ==========================================================================
-    # #MATH_ENGINE #PERFORMANCE_EVALUATION #ARRAY_PROCESSING
-    # Core logic operating entirely on NumPy array slices (No Lists)
-    # ==========================================================================
-    def calculate_score(self, s_norm, b_norm):
-        data_length = b_norm.size
-        min_samples_required = 5
-        
-        if data_length < min_samples_required: 
-            return 1
+        # Only explicit --live can instantiate a Windows mapping reader.
+        self.acc = (GearAwareACCSharedMemory(process_guard=acc_process_running)
+                    if self.mode == "live" else DemoSource())
+        self._corner_reader = None
+        self._corner_gate = None
+        self._event_corner = None
+        self._last_corner_status_at = 0.
+        # This is OPTIONAL; no change to the working score, HUD rhythm, or
+        # physics reader. No internet access during live driving.
+        if self.mode == 'live':
+            try:
+                catalog = CornerCatalog.load()
+                path_file = META_DIR / CONFIG_FILE
+                if catalog is not None and path_file.is_file():
+                    original_ai = Path(path_file.read_text(encoding='utf-8').strip())
+                    reference = FastlaneReference.load_v8(original_ai)
+                    if len(reference.xyz) != 5046:
+                        raise ValueError('Not the validated Nurburgring 24h AI route')
+                    self._corner_gate = CornerNameGate(catalog, reference)
+                    self.corner_status.setText('Corner names: metadata loaded; waiting for live position alignment')
+                else:
+                    self.corner_status.setText('Corner names OFF: run download_corner_metadata.bat and configure_fastlane.bat')
+            except (OSError, ValueError, TypeError) as exc:
+                self.corner_status.setText(f'Corner names OFF: {exc}')
+            # Always allow the independent recorder to receive live XYZ, even
+            # when RaceIQ/fastlane corner metadata has not been configured.
+            # Reuse ONE graphics reader for names and recording.
+            if self._corner_gate is not None or self.check_line_recorder.isChecked():
+                self._corner_reader = GraphicsReader(acc_process_running)
+        else:
+            self.corner_status.setText('Corner names: demo never attaches ACC graphics')
+        self._offline_since = None
+        self.tracker = EventTracker(post_seconds=POST_RELEASE_OBSERVATION_S)
+        self.stats = None
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.on_tick)
+        self._last_draw = 0.0
+        self.timer.start(40)  # 25Hz, reducing UI work during ACC tests.
+        if self.check_on_top.isChecked():
+            self.set_details_on_top(True)
+        # No need to expose the full analysis panel during driving.
+        self.mini_hud.clear_message()
+        self.mini_hud.show()
 
-        max_idx = np.argmax(b_norm)
-        b_trail = b_norm[max_idx:]
-        s_trail = s_norm[max_idx:]
-        
-        # Extracting the active telemetry slice based on the pointer
-        load_trail = self.front_load_buffer[max_idx:self.data_index]
-        slip_trail = self.front_slip_buffer[max_idx:self.data_index]
+    def _set_pedal_light_enabled(self, enabled):
+        self.settings.setValue('pedalOverlapEnabled', enabled)
+        self.pedal_blip_filter.reset()
+        self.pedal_overlap.reset()
+        self.mini_hud.set_pedal_light(None, False)
 
-        if b_trail.size < min_samples_required: 
-            return 1
+    def _update_pedal_light(self, sample):
+        if not self.check_pedal_overlap.isChecked():
+            return
+        # SAME validated physics packet; no second ACC handle or memory writer.
+        # Only the overlap LED is delayed ~0.3s for retroactive downshift matching.
+        # The existing score/corner-name HUD still updates immediately.
+        matured = self.pedal_blip_filter.push(sample.throttle, sample.brake, sample.time,
+                                              getattr(sample, 'gear', None))
+        for gas, brake, timestamp in matured:
+            reading = self.pedal_overlap.update(gas, brake, timestamp)
+            if reading.completed is None:
+                continue
+            # Count each accepted, blip-filtered completed transition ONCE.
+            self.overlap_session.record(reading.completed)
+            self.overlap_session_label.setText(self.overlap_session.summary().label())
+            try:
+                destination = (os.path.join(BASE_DIR, 'demo_data')
+                               if self.mode == 'demo' else DATA_DIR)
+                os.makedirs(destination, exist_ok=True)
+                event = reading.completed
+                entry = {'timestamp': datetime.now().isoformat(timespec='seconds'),
+                         'success': event.success, 'duration_sec': event.duration_sec,
+                         'peak_gas_percent': event.peak_gas_percent,
+                         'peak_brake_percent': event.peak_brake_percent,
+                         'monitor': 'pedal_overlap_v035_severity', 'mode': self.mode,
+                         'severity': event.severity, 'micro_overlap': event.micro_overlap,
+                         'gear_filter': getattr(sample, 'gear', None) is not None}
+                with open(os.path.join(destination, 'pedal_overlap_history.jsonl'), 'a', encoding='utf-8') as f:
+                    f.write(json.dumps(entry) + '\n')
+            except OSError:
+                pass   # logging failure must never affect ACC or live HUD
+        display = self.pedal_overlap.display(sample.time)
+        self.mini_hud.set_pedal_light(display.color, display.lit)
 
-        # #EVALUATION_METRIC #MAE #GEOMETRIC_ERROR
-        s_clamped = np.clip(s_trail, 0, self.ELASTIC_BASE_MAX)
-        ideal_b = np.sqrt(np.clip(self.ELASTIC_BASE_MAX**2 - s_clamped**2, 0, None))
-        mae = np.mean(np.abs(ideal_b - b_trail))
+    def _set_line_recorder_enabled(self, enabled):
+        self.settings.setValue('lineRecorderEnabled', bool(enabled))
+        if not enabled:
+            self.line_recorder.close()  # Flush without destroying session data.
+            self.line_recorder_status.setText('Line Recorder: paused; existing CSV preserved')
+        else:
+            if self.mode == 'live' and self._corner_reader is None:
+                self._corner_reader = GraphicsReader(acc_process_running)
+            self.line_recorder_status.setText('Line Recorder: waiting for on-track coordinates')
 
-        # #EVALUATION_METRIC #INSTABILITY #PEDAL_PUMPING
-        diffs = np.diff(b_trail)
-        pump_threshold = 0.5
-        pumps = diffs[diffs > pump_threshold]
-        pump_penalty = np.sum(pumps)
+    def _record_line_sample(self, sample, graphics):
+        if self.mode != 'live' or not self.check_line_recorder.isChecked():
+            return
+        # Only a current frame pair, never the last remembered graphics XYZ.
+        # Existing scoring/HUD path already ran before this optional work.
+        corner = (self._corner_gate.candidate(time.monotonic())
+                  if self._corner_gate is not None else None)
+        self.line_recorder.record(sample, graphics,
+                                  corner_name=corner.display_name if corner else '')
+        now = time.monotonic()
+        if now - self._line_recorder_status_at > 1.5 or self.line_recorder.last_error:
+            self._line_recorder_status_at = now
+            self.line_recorder_status.setText('Line Recorder: ' + self.line_recorder.status)
 
-        # #PRO_PHYSICS #AERODYNAMIC_PLATFORM #CHASSIS_BALANCE
-        snap_penalty = 0.0
-        if load_trail.size > 1:
-            load_diffs = np.diff(load_trail)
-            max_load_drop = abs(min(np.min(load_diffs), 0))
-            load_drop_divisor = 500.0
-            snap_penalty = max_load_drop / load_drop_divisor 
+    def _update_hud_button(self):
+        if not self.mini_hud.isVisible():
+            self.btn_hud.setText('Show Mini HUD')
+        elif self.mini_hud.isMinimized():
+            self.btn_hud.setText('Restore Mini HUD')
+        else:
+            self.btn_hud.setText('Hide Mini HUD')
 
-        # #PRO_PHYSICS #GRIP_LIMIT #UNDERSTEER_DETECTION
-        max_slip = np.max(slip_trail) if slip_trail.size > 0 else 0.0
-        slip_penalty = 0.0
-        slip_threshold = 1.5
-        if max_slip > slip_threshold:
-            slip_penalty = (max_slip - slip_threshold) * 2.0
+    def toggle_hud(self):
+        if not self.mini_hud.isVisible() or self.mini_hud.isMinimized():
+            self.mini_hud.showNormal()
+        else:
+            self.mini_hud.hide()
+        self._update_hud_button()
 
-        # #SCORING_ALGORITHM #FINAL_CALCULATION
-        score = 5.0
-        mae_threshold = 5.0
-        if mae > mae_threshold: 
-            score -= (mae - mae_threshold) * 0.30
-        score -= pump_penalty * 0.30
-        score -= snap_penalty * 0.50
-        score -= slip_penalty * 1.0
+    def set_details_on_top(self, enabled: bool):
+        self.settings.setValue('detailsAlwaysOnTop', bool(enabled))
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, bool(enabled))
+        # On Windows Qt needs to re-show after switching native window flags.
+        self.show()
+        if enabled:
+            self.raise_()
 
-        return int(np.clip(round(score), 1, 5))
+    def _with_event_corner(self, message):
+        # Captured at the release, not queried 2.6 seconds later.
+        if self._event_corner is None:
+            return message
+        return replace(message, corner_name=self._event_corner.display_name)
 
-    # ==========================================================================
-    # #MAIN_LOOP #DATA_STREAM #DYNAMIC_ROUTING
-    # ==========================================================================
-    def update_data(self):
-        speed, brake, steer, g_lat, g_long, slip_FL, slip_FR, load_FL, load_FR = self.acc.read()
-
-        # #STATE_MACHINE #IDLE_STATE
-        if self.current_state == self.STATE_IDLE:
-            if speed > self.MIN_SPEED_KPH and brake > self.MIN_BRAKE_PERCENT:
-                self.current_state = self.STATE_RECORDING
-                self.data_index = 0
-                self.actual_curve.setData(np.empty(0), np.empty(0))
-                self.score_text.setText("")
-
-        # #STATE_MACHINE #RECORDING_STATE
-        elif self.current_state == self.STATE_RECORDING:
-            
-            # Protection against buffer overflow by resetting or clamping index
-            if self.data_index >= self.BUFFER_SIZE:
-                self.data_index = self.BUFFER_SIZE - 1
-                
-            # Recording data directly into pre-allocated NumPy indices (Zero list appends)
-            self.steer_buffer[self.data_index] = steer
-            self.brake_buffer[self.data_index] = brake
-            self.front_load_buffer[self.data_index] = load_FL + load_FR
-            self.front_slip_buffer[self.data_index] = max(abs(slip_FL), abs(slip_FR))
-            
-            self.data_index += 1
-
-            # Processing only the actively recorded slice
-            active_steer = self.steer_buffer[:self.data_index]
-            active_brake = self.brake_buffer[:self.data_index]
-
-            # Dynamic elastic normalization based on real-time maximums
-            max_s = max(np.max(active_steer), 0.05)
-            max_b = max(np.max(active_brake), 10.0)
-
-            s_norm = (active_steer / max_s) * self.ELASTIC_BASE_MAX
-            b_norm = (active_brake / max_b) * self.ELASTIC_BASE_MAX
-            
-            # Dynamically adjust plot ranges based on actual data bounds to ensure visibility
-            dynamic_x_max = max(self.ELASTIC_BASE_MAX, np.max(s_norm) * 1.05)
-            dynamic_y_max = max(self.ELASTIC_BASE_MAX, np.max(b_norm) * 1.05)
-            self.plot.setXRange(0, dynamic_x_max, padding=0)
-            self.plot.setYRange(0, dynamic_y_max, padding=0)
-
-            # #REALTIME_RENDER #DYNAMIC_GRAPH
-            self.actual_curve.setData(s_norm, b_norm)
-
-            # #TRIGGER #END_OF_BRAKING
-            if brake < self.RELEASE_BRAKE_PERCENT:
-                self.current_state = self.STATE_WAITING
-                score = self.calculate_score(s_norm, b_norm)
-                self.score_text.setText(str(score))
-
-                if score == 5: self.score_text.setColor('#2ecc71')
-                elif score >= 3: self.score_text.setColor('#f1c40f')
-                else: self.score_text.setColor('#e74c3c')
-                
-                self.save_log_entry(score, s_norm, b_norm)
-                
-                cooldown_delay = 3000
-                QTimer.singleShot(cooldown_delay, self.reset_to_idle)
-
-    def save_log_entry(self, final_score, s_norm, b_norm):
-        # #DATA_EXPORT #LOGGING #IMAGE_CAPTURE
+    def _read_corner_position(self):
+        if self._corner_reader is None:
+            return None
+        now = time.monotonic()
+        graphics = None
         try:
-            os.makedirs(self.IMG_DIR, exist_ok=True)
-            os.makedirs(self.DATA_DIR, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            
-            log_entry = {
-                "timestamp": timestamp,
-                "score": final_score
-            }
-            with open(self.HISTORY_FILE, "a") as f:
-                f.write(json.dumps(log_entry) + "\n")
-                
-            QApplication.processEvents()
-            exporter = pg.exporters.ImageExporter(self.plot.scene())
-            dynamic_img_path = os.path.join(self.IMG_DIR, f"brake_{timestamp}_score_{final_score}.png")
-            exporter.export(dynamic_img_path)
-            
-            if self.stats_window is not None and self.stats_window.isVisible():
-                self.stats_window.load_and_plot_data()
+            graphics = self._corner_reader.read()
+            if self._corner_gate is not None:
+                self._corner_gate.observe(graphics, now)
+        except (OSError, ValueError, TypeError, OverflowError):
+            graphics = None
+            if self._corner_gate is not None:
+                self._corner_gate.reset()
+        if self._corner_gate is not None and now - self._last_corner_status_at > 1.5:
+            self._last_corner_status_at = now
+            self.corner_status.setText('Corner names: ' + self._corner_gate.status)
+        return graphics
 
-        except Exception as e:
-            print(f"Saving failed: {e}")
+    def _apply_hud_command(self, command: HUDCommand):
+        if command.kind == 'show' and command.message is not None:
+            self.mini_hud.set_message(command.message)
+        elif command.kind == 'clear':
+            self.mini_hud.clear_message()
 
-    def reset_to_idle(self):
-        # #STATE_RESET #CLEANUP
-        self.actual_curve.setData(np.empty(0), np.empty(0))
-        self.score_text.setText("")
-        self.current_state = self.STATE_IDLE
+    def _maybe_revise_early_exit(self, sample):
+        """Optional one-time refresh using measured 1.2s of exit telemetry.
 
-    def reset_data(self):
-        # #DATA_MANAGEMENT #FILE_WIPE
+        It remains an EARLY estimate, not the authoritative completed result.
+        No scoring formula or raw event log is changed.
+        """
+        if self._early_exit_checked or self.tracker.state != 'exit':
+            return
+        if sample.time - self.tracker.release_time < 1.22:
+            return
+        self._early_exit_checked = True
         try:
-            if os.path.exists(self.HISTORY_FILE):
-                open(self.HISTORY_FILE, 'w').close()
-            self.reset_to_idle()
-            if self.stats_window is not None:
-                self.stats_window.load_and_plot_data()
-                self.stats_window.summary_label.setText("Data reset. Go drive some corners! #FreshStart")
-            print("Stint data reset successfully.")
-        except Exception as e:
-            print(f"Reset error: {e}")
+            early = assess(tuple(self.tracker.samples), self.tracker.release_index,
+                           phase='final')
+            early_text = describe(early)
+            if early.score == 5:
+                # Short-lived, partial-exit evidence is not a final proof.
+                from hud_presentation import HUDMessage
+                early_text = HUDMessage(early_text.grade, 'Good exit so far',
+                                        early_text.number_color, early_text.text_color)
+            self._apply_hud_command(self._hud_flow.revise(self._with_event_corner(early_text), sample.time))
+        except (ValueError, TypeError, OverflowError, FloatingPointError):
+            pass
+
+    def on_tick(self):
+        sample = self.acc.read()
+        if sample is None:
+            if self.mode == "live":
+                if self._offline_since is None:
+                    self._offline_since = time.monotonic()
+                elif time.monotonic() - self._offline_since > 3.0:
+                    # Never blend event histories across lost ACC sessions.
+                    self.tracker.reset()
+                    self._apply_hud_command(self._hud_flow.reset())
+                    self._early_exit_checked = False
+                    if self._corner_gate is not None:
+                        self._corner_gate.reset()
+                    self._event_corner = None
+                    self.pedal_blip_filter.reset()
+                    self.pedal_overlap.reset()
+                    self.mini_hud.set_pedal_light(None, False)
+                if self._offline_since is not None and time.monotonic() - self._offline_since > 0.75:
+                    self.pedal_blip_filter.reset()
+                    self.pedal_overlap.reset()
+                    self.mini_hud.set_pedal_light(None, False)
+                self.status.setText(self.acc.connect_error or "Waiting for ACC physics frame…")
+            # A lost telemetry feed must not leave old feedback on screen.
+            self._apply_hud_command(self._hud_flow.tick(time.monotonic()))
+            return
+        self._offline_since = None
+        graphics = self._read_corner_position()
+        self._update_pedal_light(sample)
+        prefix = "SYNTHETIC DEMO" if self.mode == "demo" else "ACC LIVE (EXPERIMENTAL)"
+        self.status.setText(f"{prefix} | {sample.speed_kph:.0f} km/h | "
+                            f"Brake {sample.brake * 100:.0f}% | "
+                            f"Yaw {np.degrees(sample.yaw_rate):+.1f}°/s")
+        updates = self.tracker.update(sample)
+        for feedback in updates:
+            # 0.2.2 immediate feedback and live ACC reader are unchanged.
+            # New math runs AFTER the reader/tracker have produced an event.
+            completed = (self.tracker.last_completed_event if feedback.phase == "final"
+                         else (tuple(self.tracker.samples), self.tracker.release_index))
+            coach = None
+            if completed is not None:
+                try:
+                    coach = assess(*completed, phase=feedback.phase, legacy=feedback)
+                except (ValueError, TypeError, OverflowError, FloatingPointError) as exc:
+                    self.coaching_status.setText(f"Coaching unavailable: {exc}")
+            self.show_feedback(feedback, coach)
+            if feedback.phase == "provisional":
+                elapsed = (completed[0][-1].time - completed[0][0].time
+                           if completed is not None and completed[0] else 0.0)
+                self._event_corner = (self._corner_gate.candidate(time.monotonic())
+                                      if self._corner_gate is not None else None)
+                self._hud_flow.new_release(self._with_event_corner(describe(coach)), sample.time, elapsed)
+                self._early_exit_checked = False
+            if feedback.phase == "final":
+                calibration = None
+                # The detailed window/history gets the authoritative final
+                # result. The glance HUD may UPDATE an existing notice, but
+                # must never pop up a stale late result after the next corner.
+                self._apply_hud_command(self._hud_flow.revise(self._with_event_corner(describe(coach)), sample.time))
+                calibration = None
+                if completed is not None:
+                    try:
+                        calibration = calibrate_live(feedback, *completed)
+                    except (ValueError, TypeError, OverflowError, FloatingPointError):
+                        # Preserve main coach result even if older shadow fails.
+                        pass
+                self.save_event(feedback, calibration, coach, completed)
+        # Newest event wins. Never wait for a fully straight vehicle; a new
+        # brake automatically hides the previous corner's short feedback.
+        self._maybe_revise_early_exit(sample)
+        self._apply_hud_command(self._hud_flow.tick(
+            sample.time, braking_active=(self.tracker.state == 'braking')))
+        # Optional CSV work runs AFTER the established fast HUD response.
+        self._record_line_sample(sample, graphics)
+        # Live plots are throttled independently of telemetry capture.
+        now = time.monotonic()
+        if now - self._last_draw >= 0.12:
+            self.draw_live_event()
+            self._last_draw = now
+
+    def draw_live_event(self):
+        points = self.tracker.samples
+        if not points:
+            return  # Keep completed event visible during idle; do not erase instant feedback.
+        x = np.fromiter((abs(s.steer) * 100 for s in points), float)
+        y = np.fromiter((s.brake * 100 for s in points), float)
+        yaw = np.fromiter((np.degrees(s.yaw_rate) for s in points), float)
+        t = np.fromiter((s.time - points[0].time for s in points), float)
+        # A genuine percentage axis, not per-corner re-normalization to 100%.
+        # Auto-extend the *display range* if large steering is observed.
+        self.path_plot.setXRange(0, max(35., float(np.ceil(max(x) / 10.) * 10.)), padding=0)
+        self.path_trace.setData(x, y)
+        self.yaw_trace.setData(t, yaw)
+
+    def show_feedback(self, feedback: Feedback, coaching=None):
+        old_grade = "–" if feedback.score is None else str(feedback.score)
+        self.legacy_status.setText(
+            f"Legacy 0.2.2: {old_grade}/5 | {feedback.label} (comparison only)")
+        grade = "–" if coaching is None or coaching.score is None else str(coaching.score)
+        prefix = "IMMEDIATE / PROVISIONAL" if feedback.phase == "provisional" else "POST-RELEASE REVIEW"
+        self.rating.setText(f"{grade} / 5  ·  {prefix}")
+        self.diagnosis.setText(coaching.label if coaching else "ANALYSIS UNAVAILABLE")
+        if coaching is None:
+            self.detail.setText("Telemetry event received, but coaching calculation failed.")
+            return
+        e = coaching.evidence
+        detail = (f"Turning on brake: {e.get('turn_during_brake_s', 0):.2f}s | "
+                  f"Brake taper: {e.get('brake_taper_pct', 0):.0f}% | "
+                  f"Coast: {e.get('coasting_after_release_s', 0):.2f}s\n"
+                  f"{coaching.explanation}")
+        self.detail.setText(detail)
+        self.coaching_status.setText(
+            f"ADVANCED 0.2.4.1 | Evidence: {coaching.confidence} | "
+            f"{'Exit progress observed' if e.get('exit_verified') else 'Exit not yet verified'}\n"
+            "A coaching estimate, not proof of the fastest line.")
+        color = ("#b8c2cc" if coaching.score is None else
+                 "#37d58e" if coaching.score >= 5 else
+                 "#f1c40f" if coaching.score >= 3 else "#e76e62")
+        self.rating.setStyleSheet(f"font-size: 29px; font-weight: 700; color: {color};")
+
+    def save_event(self, feedback: Feedback, calibration=None, coaching=None, completed=None):
+        destination = os.path.join(BASE_DIR, "demo_data") if self.mode == "demo" else DATA_DIR
+        history = os.path.join(destination, "braking_history.jsonl")
+        os.makedirs(destination, exist_ok=True)
+        name = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        entry = feedback.as_log()
+        # Compatibility: legacy and 0.2.3 scores are NEVER replaced.
+        if calibration is not None:
+            entry["calibration"] = calibration.as_log()
+        if coaching is not None:
+            entry["coaching"] = coaching.as_log()
+        entry["timestamp"] = name
+        if self._event_corner is not None:
+            entry['corner'] = {'name': self._event_corner.display_name,
+                               'turn_number': self._event_corner.number,
+                               'source': 'RaceIQ experimental ACC segments',
+                               'alignment': 'candidate; Windows validation pending'}
+        try:
+            with open(history, "a", encoding="utf-8") as fp:
+                fp.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            self.status.setText(f"Could not save event: {exc}")
+        # Capture actual time series separately for future OFFLINE re-grading.
+        # No screenshots, no writes to game memory, no data from other apps.
+        if completed is not None:
+            try:
+                event_samples, release_idx = completed
+                raw = encode_event(name, event_samples, release_idx)
+                raw_file = os.path.join(destination, "raw_braking_events.jsonl")
+                with open(raw_file, "a", encoding="utf-8") as fp:
+                    fp.write(json.dumps(raw, ensure_ascii=False) + "\n")
+            except (OSError, ValueError, TypeError) as exc:
+                self.status.setText(f"Could not save offline replay trace: {exc}")
+        if self.stats is not None and self.stats.isVisible():
+            self.stats.load_and_plot_data()
+
+    def archive_stint(self):
+        if QMessageBox.question(self, "New Stint", "Archive the existing log and start a new stint?",
+                                QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return
+        try:
+            target = os.path.join(BASE_DIR, "demo_data") if self.mode == "demo" else DATA_DIR
+            history = os.path.join(target, "braking_history.jsonl")
+            os.makedirs(target, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            if os.path.exists(history):
+                os.replace(history, os.path.join(target, f"braking_history_{stamp}.jsonl"))
+            raw = os.path.join(target, "raw_braking_events.jsonl")
+            if os.path.exists(raw):
+                os.replace(raw, os.path.join(target, f"raw_braking_events_{stamp}.jsonl"))
+            overlap_log = os.path.join(target, "pedal_overlap_history.jsonl")
+            if os.path.exists(overlap_log):
+                os.replace(overlap_log, os.path.join(target, f"pedal_overlap_history_{stamp}.jsonl"))
+            self.line_recorder.archive_and_restart()
+            self.line_recorder_status.setText('Line Recorder: new stint; waiting for on-track coordinates')
+            self.tracker.reset()
+            self.pedal_blip_filter.reset()
+            self.pedal_overlap.reset()
+            self.overlap_session.reset()
+            self.overlap_session_label.setText(self.overlap_session.summary().label())
+            self.mini_hud.set_pedal_light(None, False)
+            self._apply_hud_command(self._hud_flow.reset())
+            self._early_exit_checked = False
+            self._event_corner = None
+            if self._corner_gate is not None:
+                self._corner_gate.reset()
+            self.mini_hud.clear_message()
+            self.rating.setText("– / 5")
+            self.diagnosis.setText("NEW STINT")
+            self.detail.setText("Previous event log archived safely in data/.")
+            self.coaching_status.setText("ADVANCED 0.2.4.1: waiting for completed event")
+            self.legacy_status.setText("Legacy 0.2.2: no event yet")
+            self.path_trace.setData([], [])
+            self.yaw_trace.setData([], [])
+            if self.stats is not None:
+                self.stats.load_and_plot_data()
+        except OSError as exc:
+            QMessageBox.warning(self, "Archive failed", str(exc))
+
+    def closeEvent(self, event):
+        self.timer.stop()
+        self.line_recorder.close()
+        self.pedal_blip_filter.reset()
+        self.pedal_overlap.reset()
+        self.acc.close()
+        if self._corner_reader is not None:
+            self._corner_reader.close()
+        self.mini_hud.close()
+        super().closeEvent(event)
 
     def show_stats(self):
-        # #UI_NAVIGATION #WINDOW_SPAWN
-        if self.stats_window is None:
-            self.stats_window = BrakingStatsWindow()
-        self.stats_window.load_and_plot_data()
-        self.stats_window.show()
-        self.stats_window.raise_()
+        if self.stats is None:
+            source = (os.path.join(BASE_DIR, "demo_data", "braking_history.jsonl")
+                      if self.mode == "demo" else HISTORY)
+            self.stats = BrakingStatsWindow(history_file=source)
+        self.stats.load_and_plot_data()
+        self.stats.show()
+        self.stats.raise_()
 
-if __name__ == '__main__':
-    window = TrailBrakingApp()
+
+def main():
+    parser = argparse.ArgumentParser(description="Advanced Trail Braking v0.3.5.2")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--demo", action="store_true", help="Synthetic UI demo; never opens ACC memory")
+    mode.add_argument("--live", action="store_true", help="Experimental read-only ACC integration")
+    args = parser.parse_args()
+    chosen_mode = "live" if args.live else "demo"  # fail-safe default
+    app = QApplication(sys.argv[:1])
+    # Scope dark fills to the analysis window. The Mini HUD must remain alpha.
+    app.setStyleSheet("QWidget#MainCentral { background: #17232c; color: white; } "
+                      "QMainWindow { background: #17232c; color: white; } "
+                      "QPushButton { background: #334d62; color: white; padding: 9px; border-radius: 5px; } "
+                      "QPushButton:hover { background: #466985; } "
+                      "QCheckBox { color: white; }")
+    window = TrailBrakingApp(mode=chosen_mode)
     window.show()
-    sys.exit(app.exec_())
+    return app.exec_()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
