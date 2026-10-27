@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (QApplication, QGraphicsDropShadowEffect, QHBoxLayou
                              QLabel, QToolButton, QVBoxLayout, QWidget)
 
 from hud_presentation import HUDMessage
+from overlap_indicator import PedalOverlapIndicator
 
 
 class MiniHUD(QWidget):
@@ -23,8 +24,8 @@ class MiniHUD(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setWindowTitle('Advanced Trail Braking – Mini HUD')
-        self.setMinimumSize(350, 155)
-        self.resize(440, 165)
+        self.setMinimumSize(388, 155)
+        self.resize(490, 165)
         self._drag_origin = None
         self._window_origin = None
 
@@ -76,6 +77,10 @@ class MiniHUD(QWidget):
         right.addWidget(self.feedback, stretch=1)
         line.addWidget(self.number)
         line.addLayout(right, stretch=1)
+        # Pedal overlap light lives on THIS alpha-enabled window, not an
+        # independent opaque window or a second ACC connection.
+        self.overlap_indicator = PedalOverlapIndicator()
+        line.addWidget(self.overlap_indicator)
         root.addLayout(line, stretch=1)
 
         for item in (self.number, self.feedback, self.corner_name):
@@ -90,6 +95,7 @@ class MiniHUD(QWidget):
         # while constructing a widget; eventFilter needs all these
         # attributes to exist before inspecting mouse events.
         self.drag_handle.installEventFilter(self)
+        self.overlap_indicator.installEventFilter(self)
         # All HUD content paints on Qt's transparent surface. Never use the
         # global app theme's opaque QWidget background on this top-level.
         self.setStyleSheet('''
@@ -111,6 +117,7 @@ class MiniHUD(QWidget):
                 color: white;
             }
         ''')
+        # Preserve the user's proven white, slightly larger corner-name style.
         self.corner_name.setFont(QFont('Segoe UI', 16, QFont.Bold))
         self.corner_name.setStyleSheet('background: transparent; border: none; color: #FFFFFF;')
         self.set_message(HUDMessage(None, 'Waiting for completed corner', '#BEC9D6', '#BEC9D6'))
@@ -144,6 +151,10 @@ class MiniHUD(QWidget):
         self.feedback.setText(msg.text)
         self.feedback.setStyleSheet('background: transparent; border: none; color: ' + msg.text_color + ';')
 
+    def set_pedal_light(self, color=None, lit=False):
+        """Pure UI update. Never changes the existing quick grading message."""
+        self.overlap_indicator.set_light(color, lit)
+
     def clear_message(self):
         """Keep the HUD window draggable/closable, but clear idle feedback."""
         self.number.clear()
@@ -157,7 +168,8 @@ class MiniHUD(QWidget):
         if source in (getattr(self, 'number', None),
                       getattr(self, 'feedback', None),
                       getattr(self, 'corner_name', None),
-                      getattr(self, 'drag_handle', None)):
+                      getattr(self, 'drag_handle', None),
+                      getattr(self, 'overlap_indicator', None)):
             if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
                 self._drag_origin = event.globalPos()
                 self._window_origin = self.pos()

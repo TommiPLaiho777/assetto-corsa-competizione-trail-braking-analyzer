@@ -18,6 +18,19 @@ class PersistentGrabHandleTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication(['test', '-platform', 'offscreen'])
 
+    def test_startup_event_filter_does_not_access_unbuilt_widgets(self):
+        # Regression for 0.3.1 startup traceback: a Qt control can
+        # dispatch events immediately after installEventFilter().
+        w = MiniHUD()
+        try:
+            self.assertIsNotNone(w.number)
+            self.assertIsNotNone(w.feedback)
+            self.assertIsNotNone(w.corner_name)
+            self.assertIsNotNone(w.drag_handle)
+            self.app.processEvents()
+        finally:
+            w.close()
+
     def test_grab_handle_survives_message_expiry(self):
         w = MiniHUD()
         try:

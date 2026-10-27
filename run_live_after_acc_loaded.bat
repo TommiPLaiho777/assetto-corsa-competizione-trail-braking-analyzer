@@ -1,6 +1,6 @@
 @echo off
 cd /d "%~dp0"
-echo [ADVANCED TRAIL BRAKING 0.2.5 - EXPERIMENTAL READ-ONLY LIVE]
+echo [ADVANCED TRAIL BRAKING 0.3.5.2 - EXPERIMENTAL READ-ONLY LIVE]
 echo CAUTION: ACC live compatibility is NOT YET VERIFIED on your Windows PC.
 echo 1. Close ALL older Trail Braking windows.
 echo 2. START ACC WITHOUT THIS APP and enter a loaded practice session.

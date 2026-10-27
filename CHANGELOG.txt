@@ -44,3 +44,10 @@
 - Cautious matching from read-only graphics; suppress name if uncertain
 - Small separate corner name on Mini HUD and optional history metadata
 - No changes to scoring, ACC physics reader, HUD rhythm or visible duration
+
+0.3.1.1 - Fix Mini HUD initialization order; mouse filter installed after widget setup.
+
+## 0.3.1.2 - corner-name alignment and configuration diagnostics
+* The lap-zero offset no longer prevents verified names.
+* diagnose_corner_names.bat checks optional data dependencies.
+* No changes to HUD timings, scoring or ACC reader.

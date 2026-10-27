@@ -38,6 +38,7 @@ class GraphicsSample:
     ideal_line_on: bool
     session: int
     status: int
+    completed_laps: int | None = None
 
 
 def decode_graphics(buf: bytes) -> GraphicsSample | None:
@@ -58,7 +59,8 @@ def decode_graphics(buf: bytes) -> GraphicsSample | None:
     if not all(math.isfinite(c) and abs(c)<100_000 for c in xyz):
         return None
     return GraphicsSample(g.packet,xyz,float(g.normalized_position),
-                          g.active_cars,bool(g.ideal_line_on),g.session,g.status)
+                          g.active_cars,bool(g.ideal_line_on),g.session,g.status,
+                          int(g.completed_laps) if 0 <= g.completed_laps <= 100000 else None)
 
 class GraphicsReader:
     MAP_NAME = r'Local\acpmf_graphics'

@@ -1,6 +1,6 @@
 @echo off
 cd /d "%~dp0"
-echo [ADVANCED TRAIL BRAKING 0.2.5] Private Python environment
+echo [ADVANCED TRAIL BRAKING 0.3.5.2] Private Python environment
 where py >nul 2>nul
 if errorlevel 1 (
   echo Python launcher missing. Install Python 3.11 or 3.12 x64 first.

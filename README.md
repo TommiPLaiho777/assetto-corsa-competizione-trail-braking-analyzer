@@ -1,3 +1,9 @@
+# 0.3.2 – PEDAL OVERLAP LIGHT (new)
+
+See `RELEASE_NOTES_V032.md`. Pure new monitor and alpha-transparent red/green dot appear next to the existing HUD. The original `pedals.py` must never be used to read ACC, because its `mmap` call could create a mapping with the game name.
+
+---
+
 # 0.2.5.3 - Persistent Mini HUD drag grip
 
 The proven 0.2.5.2 rapid-corner timings, assessment rules, telemetry reader, and
@@ -216,3 +222,11 @@ only an initial check, not proof that each name is correct. A 90-second
 calibrate name placement before considering the feature production-ready.
 If imported files are absent/bad, ACC graphics cannot be read, or the position
 registration differs, the feature fails closed and ordinary HUD stays working.
+
+## Mini HUD startup fix 0.3.1.1
+
+The 0.3.1 Qt eventFilter could run before the grade widgets were created. Version 0.3.1.1 fixes the initialization order. To patch an existing installation keep its `.venv` and `data` intact and replace only `mini_hud.py`, after closing Advanced Trail Braking. No game restart required.
+
+
+### Corner-name troubleshooting (0.3.1.2)
+Run `diagnose_corner_names.bat`. Two downloaded JSON files alone do not activate corner names: `configure_fastlane.bat` must also register the original Nürburgring 24h fastlane.ai path. During live driving, the detailed window displays `Corner names: ...` with diagnostic alignment status. Names appear ONLY on turn-linked brake-release feedback, not continuously between corners.

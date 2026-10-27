@@ -16,7 +16,8 @@ from PyQt5.QtWidgets import (QApplication, QCheckBox, QHBoxLayout, QLabel, QMain
                              QMessageBox, QPushButton, QVBoxLayout, QWidget)
 import pyqtgraph as pg
 
-from acc_memory import ACCSharedMemory, acc_process_running
+from acc_memory import acc_process_running
+from acc_gear_reader import GearAwareACCSharedMemory
 from demo_source import DemoSource
 from advanced_engine import EventTracker, Feedback
 from calibration_engine import calibrate_live
@@ -29,6 +30,10 @@ from hud_rhythm import HUDRhythm, HUDCommand
 from corner_names import CornerCatalog, CornerNameGate, META_DIR, CONFIG_FILE
 from acc_graphics_probe import GraphicsReader
 from line_reference import FastlaneReference
+from pedal_overlap import PedalOverlapMonitor
+from pedal_blip_filter import DownshiftBlipFilter
+from overlap_session_stats import OverlapSessionStats
+from line_recorder import LineRecorder
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -40,10 +45,10 @@ class TrailBrakingApp(QMainWindow):
     def __init__(self, mode: str = "demo"):
         super().__init__()
         self.mode = mode
-        self.setWindowTitle(f"Advanced Trail Braking 0.3.1 | {mode.upper()} rotation coach")
+        self.setWindowTitle(f"Advanced Trail Braking 0.3.5.2 | {mode.upper()} rotation coach")
         # Safety hotfix: do not force an overlay above the DirectX game.
         # Use normal desktop/windowed layout during initial validation.
-        self.resize(550, 680)
+        self.resize(550, 720)
         # Native Windows title bar: its normal minimize control is retained.
         # Detailed GUI stays on top ONLY when the user explicitly requests it.
         self.setWindowFlags(Qt.Window | Qt.WindowMinimizeButtonHint |
@@ -53,6 +58,11 @@ class TrailBrakingApp(QMainWindow):
         self._early_exit_checked = False
         self.mini_hud = MiniHUD()  # independent top-level window, not a child
         self.mini_hud.visibilityChanged.connect(self._update_hud_button)
+        self.pedal_overlap = PedalOverlapMonitor()
+        self.pedal_blip_filter = DownshiftBlipFilter()
+        self.overlap_session = OverlapSessionStats()
+        self.line_recorder = LineRecorder(DATA_DIR)
+        self._line_recorder_status_at = 0.0
         central = QWidget()
         central.setObjectName('MainCentral')
         self.setCentralWidget(central)
@@ -72,6 +82,42 @@ class TrailBrakingApp(QMainWindow):
         self.check_on_top.setChecked(self.settings.value('detailsAlwaysOnTop', False, type=bool))
         self.check_on_top.toggled.connect(self.set_details_on_top)
         layout.addWidget(self.check_on_top)
+        self.check_pedal_overlap = QCheckBox('Pedal overlap light (experimental)')
+        self.check_pedal_overlap.setToolTip('Red: significant gas+brake overlap. Short overlaps only counted as micro. Verified downshift blips filtered. Grades unchanged.')
+        self.check_pedal_overlap.setChecked(self.settings.value('pedalOverlapEnabled', True, type=bool))
+        self.check_pedal_overlap.toggled.connect(self._set_pedal_light_enabled)
+        layout.addWidget(self.check_pedal_overlap)
+        # One unobtrusive live summary in the details panel; NOT in the alpha Mini HUD.
+        # Denominator is completed brake-to-throttle transfers, not running time.
+        self.overlap_session_label = QLabel(self.overlap_session.summary().label())
+        self.overlap_session_label.setWordWrap(True)
+        self.overlap_session_label.setToolTip(
+            'Significant overlap: strong >=0.24s, medium >=0.36s, or light >=0.60s. '
+            'Short overlap (micro) is tracked separately without a red flash. '
+            'Confirmed downshift auto-blips are filtered. Percent is per completed '
+            'brake-to-throttle transition, not percent of driving time. '
+            'Archive & New Stint resets counts.')
+        self.overlap_session_label.setStyleSheet(
+            'color: #e8f0f5; background: #263746; padding: 7px; font-weight: 600;')
+        layout.addWidget(self.overlap_session_label)
+
+        # Optional, track-agnostic recording. Only the existing read-only
+        # graphics probe and physics sample feed this module. No Mini HUD changes.
+        self.check_line_recorder = QCheckBox('Record driving line (live ACC)')
+        self.check_line_recorder.setToolTip(
+            'Write valid on-track XYZ, progress, speed and pedal data to '
+            'data/line_trace.csv. Not available in demo. No AI-line grading.')
+        self.check_line_recorder.setChecked(
+            self.mode == 'live' and self.settings.value('lineRecorderEnabled', True, type=bool))
+        self.check_line_recorder.setEnabled(self.mode == 'live')
+        self.check_line_recorder.toggled.connect(self._set_line_recorder_enabled)
+        layout.addWidget(self.check_line_recorder)
+        self.line_recorder_status = QLabel('Line Recorder: ' + (
+            'Waiting for on-track ACC coordinates' if self.mode == 'live'
+            else 'Disabled in demo (no game position)'))
+        self.line_recorder_status.setWordWrap(True)
+        self.line_recorder_status.setStyleSheet('color: #afd7c8; padding: 3px;')
+        layout.addWidget(self.line_recorder_status)
 
         self.status = QLabel("SAFE DEMO – synthetic data only" if mode == "demo"
                              else "LIVE EXPERIMENTAL – waiting for ACC physics data")
@@ -132,7 +178,7 @@ class TrailBrakingApp(QMainWindow):
         layout.addLayout(row)
 
         # Only explicit --live can instantiate a Windows mapping reader.
-        self.acc = (ACCSharedMemory(process_guard=acc_process_running)
+        self.acc = (GearAwareACCSharedMemory(process_guard=acc_process_running)
                     if self.mode == "live" else DemoSource())
         self._corner_reader = None
         self._corner_gate = None
@@ -150,12 +196,16 @@ class TrailBrakingApp(QMainWindow):
                     if len(reference.xyz) != 5046:
                         raise ValueError('Not the validated Nurburgring 24h AI route')
                     self._corner_gate = CornerNameGate(catalog, reference)
-                    self._corner_reader = GraphicsReader(acc_process_running)
-                    self.corner_status.setText('Corner names: waiting for verified live alignment')
+                    self.corner_status.setText('Corner names: metadata loaded; waiting for live position alignment')
                 else:
                     self.corner_status.setText('Corner names OFF: run download_corner_metadata.bat and configure_fastlane.bat')
             except (OSError, ValueError, TypeError) as exc:
                 self.corner_status.setText(f'Corner names OFF: {exc}')
+            # Always allow the independent recorder to receive live XYZ, even
+            # when RaceIQ/fastlane corner metadata has not been configured.
+            # Reuse ONE graphics reader for names and recording.
+            if self._corner_gate is not None or self.check_line_recorder.isChecked():
+                self._corner_reader = GraphicsReader(acc_process_running)
         else:
             self.corner_status.setText('Corner names: demo never attaches ACC graphics')
         self._offline_since = None
@@ -170,6 +220,70 @@ class TrailBrakingApp(QMainWindow):
         # No need to expose the full analysis panel during driving.
         self.mini_hud.clear_message()
         self.mini_hud.show()
+
+    def _set_pedal_light_enabled(self, enabled):
+        self.settings.setValue('pedalOverlapEnabled', enabled)
+        self.pedal_blip_filter.reset()
+        self.pedal_overlap.reset()
+        self.mini_hud.set_pedal_light(None, False)
+
+    def _update_pedal_light(self, sample):
+        if not self.check_pedal_overlap.isChecked():
+            return
+        # SAME validated physics packet; no second ACC handle or memory writer.
+        # Only the overlap LED is delayed ~0.3s for retroactive downshift matching.
+        # The existing score/corner-name HUD still updates immediately.
+        matured = self.pedal_blip_filter.push(sample.throttle, sample.brake, sample.time,
+                                              getattr(sample, 'gear', None))
+        for gas, brake, timestamp in matured:
+            reading = self.pedal_overlap.update(gas, brake, timestamp)
+            if reading.completed is None:
+                continue
+            # Count each accepted, blip-filtered completed transition ONCE.
+            self.overlap_session.record(reading.completed)
+            self.overlap_session_label.setText(self.overlap_session.summary().label())
+            try:
+                destination = (os.path.join(BASE_DIR, 'demo_data')
+                               if self.mode == 'demo' else DATA_DIR)
+                os.makedirs(destination, exist_ok=True)
+                event = reading.completed
+                entry = {'timestamp': datetime.now().isoformat(timespec='seconds'),
+                         'success': event.success, 'duration_sec': event.duration_sec,
+                         'peak_gas_percent': event.peak_gas_percent,
+                         'peak_brake_percent': event.peak_brake_percent,
+                         'monitor': 'pedal_overlap_v035_severity', 'mode': self.mode,
+                         'severity': event.severity, 'micro_overlap': event.micro_overlap,
+                         'gear_filter': getattr(sample, 'gear', None) is not None}
+                with open(os.path.join(destination, 'pedal_overlap_history.jsonl'), 'a', encoding='utf-8') as f:
+                    f.write(json.dumps(entry) + '\n')
+            except OSError:
+                pass   # logging failure must never affect ACC or live HUD
+        display = self.pedal_overlap.display(sample.time)
+        self.mini_hud.set_pedal_light(display.color, display.lit)
+
+    def _set_line_recorder_enabled(self, enabled):
+        self.settings.setValue('lineRecorderEnabled', bool(enabled))
+        if not enabled:
+            self.line_recorder.close()  # Flush without destroying session data.
+            self.line_recorder_status.setText('Line Recorder: paused; existing CSV preserved')
+        else:
+            if self.mode == 'live' and self._corner_reader is None:
+                self._corner_reader = GraphicsReader(acc_process_running)
+            self.line_recorder_status.setText('Line Recorder: waiting for on-track coordinates')
+
+    def _record_line_sample(self, sample, graphics):
+        if self.mode != 'live' or not self.check_line_recorder.isChecked():
+            return
+        # Only a current frame pair, never the last remembered graphics XYZ.
+        # Existing scoring/HUD path already ran before this optional work.
+        corner = (self._corner_gate.candidate(time.monotonic())
+                  if self._corner_gate is not None else None)
+        self.line_recorder.record(sample, graphics,
+                                  corner_name=corner.display_name if corner else '')
+        now = time.monotonic()
+        if now - self._line_recorder_status_at > 1.5 or self.line_recorder.last_error:
+            self._line_recorder_status_at = now
+            self.line_recorder_status.setText('Line Recorder: ' + self.line_recorder.status)
 
     def _update_hud_button(self):
         if not self.mini_hud.isVisible():
@@ -201,17 +315,22 @@ class TrailBrakingApp(QMainWindow):
         return replace(message, corner_name=self._event_corner.display_name)
 
     def _read_corner_position(self):
-        if self._corner_gate is None or self._corner_reader is None:
-            return
+        if self._corner_reader is None:
+            return None
         now = time.monotonic()
+        graphics = None
         try:
             graphics = self._corner_reader.read()
-            self._corner_gate.observe(graphics, now)
+            if self._corner_gate is not None:
+                self._corner_gate.observe(graphics, now)
         except (OSError, ValueError, TypeError, OverflowError):
-            self._corner_gate.reset()
-        if now - self._last_corner_status_at > 1.5:
+            graphics = None
+            if self._corner_gate is not None:
+                self._corner_gate.reset()
+        if self._corner_gate is not None and now - self._last_corner_status_at > 1.5:
             self._last_corner_status_at = now
             self.corner_status.setText('Corner names: ' + self._corner_gate.status)
+        return graphics
 
     def _apply_hud_command(self, command: HUDCommand):
         if command.kind == 'show' and command.message is not None:
@@ -257,12 +376,20 @@ class TrailBrakingApp(QMainWindow):
                     if self._corner_gate is not None:
                         self._corner_gate.reset()
                     self._event_corner = None
+                    self.pedal_blip_filter.reset()
+                    self.pedal_overlap.reset()
+                    self.mini_hud.set_pedal_light(None, False)
+                if self._offline_since is not None and time.monotonic() - self._offline_since > 0.75:
+                    self.pedal_blip_filter.reset()
+                    self.pedal_overlap.reset()
+                    self.mini_hud.set_pedal_light(None, False)
                 self.status.setText(self.acc.connect_error or "Waiting for ACC physics frame…")
             # A lost telemetry feed must not leave old feedback on screen.
             self._apply_hud_command(self._hud_flow.tick(time.monotonic()))
             return
         self._offline_since = None
-        self._read_corner_position()
+        graphics = self._read_corner_position()
+        self._update_pedal_light(sample)
         prefix = "SYNTHETIC DEMO" if self.mode == "demo" else "ACC LIVE (EXPERIMENTAL)"
         self.status.setText(f"{prefix} | {sample.speed_kph:.0f} km/h | "
                             f"Brake {sample.brake * 100:.0f}% | "
@@ -306,6 +433,8 @@ class TrailBrakingApp(QMainWindow):
         self._maybe_revise_early_exit(sample)
         self._apply_hud_command(self._hud_flow.tick(
             sample.time, braking_active=(self.tracker.state == 'braking')))
+        # Optional CSV work runs AFTER the established fast HUD response.
+        self._record_line_sample(sample, graphics)
         # Live plots are throttled independently of telemetry capture.
         now = time.monotonic()
         if now - self._last_draw >= 0.12:
@@ -402,7 +531,17 @@ class TrailBrakingApp(QMainWindow):
             raw = os.path.join(target, "raw_braking_events.jsonl")
             if os.path.exists(raw):
                 os.replace(raw, os.path.join(target, f"raw_braking_events_{stamp}.jsonl"))
+            overlap_log = os.path.join(target, "pedal_overlap_history.jsonl")
+            if os.path.exists(overlap_log):
+                os.replace(overlap_log, os.path.join(target, f"pedal_overlap_history_{stamp}.jsonl"))
+            self.line_recorder.archive_and_restart()
+            self.line_recorder_status.setText('Line Recorder: new stint; waiting for on-track coordinates')
             self.tracker.reset()
+            self.pedal_blip_filter.reset()
+            self.pedal_overlap.reset()
+            self.overlap_session.reset()
+            self.overlap_session_label.setText(self.overlap_session.summary().label())
+            self.mini_hud.set_pedal_light(None, False)
             self._apply_hud_command(self._hud_flow.reset())
             self._early_exit_checked = False
             self._event_corner = None
@@ -423,6 +562,9 @@ class TrailBrakingApp(QMainWindow):
 
     def closeEvent(self, event):
         self.timer.stop()
+        self.line_recorder.close()
+        self.pedal_blip_filter.reset()
+        self.pedal_overlap.reset()
         self.acc.close()
         if self._corner_reader is not None:
             self._corner_reader.close()
@@ -440,7 +582,7 @@ class TrailBrakingApp(QMainWindow):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Advanced Trail Braking v0.3.1")
+    parser = argparse.ArgumentParser(description="Advanced Trail Braking v0.3.5.2")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--demo", action="store_true", help="Synthetic UI demo; never opens ACC memory")
     mode.add_argument("--live", action="store_true", help="Experimental read-only ACC integration")
